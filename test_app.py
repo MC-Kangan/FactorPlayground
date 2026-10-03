@@ -1,0 +1,79 @@
+import json
+
+import pytest
+from app import app, build_request, render_result, run_study, select_preset, update_result
+
+
+def controls(preset="french", frequency="monthly", extra="", advanced=""):
+    return (
+        "US:AAPL",
+        preset,
+        select_preset(preset)[1],
+        extra,
+        advanced,
+        frequency,
+        "US",
+        "2017-01-01",
+        "2025-01-01",
+        60 if frequency == "monthly" else 252,
+        60 if frequency == "monthly" else 252,
+        3,
+        "",
+    )
+
+
+@pytest.mark.parametrize("preset", ["french", "us_etf"])
+@pytest.mark.parametrize("frequency", ["daily", "monthly"])
+def test_demo_end_to_end(preset, frequency):
+    report = run_study("demo", *controls(preset, frequency))
+    p = report["results"][0]["presentation"]
+    assert p["coefficients"]
+    assert p["sample_count"] >= 60
+    assert render_result(report, "demo")
+
+
+def test_multiple_extra_factors_and_subset():
+    args = list(controls(extra="Pharma | US:IHE\nEnergy | US:XLE"))
+    args[2] = ["market_excess", "hml"]
+    report = run_study("demo", *args)
+    assert len(report["results"][0]["presentation"]["coefficients"]) == 5
+
+
+def test_ten_custom_factors():
+    factors = [
+        dict(
+            id=f"factor_{i}",
+            label=f"Factor {i}",
+            kind="asset_return",
+            instrument=dict(symbol=f"ETF{i}", market="US"),
+        )
+        for i in range(10)
+    ]
+    report = run_study("demo", *controls("custom", advanced=json.dumps(factors)))
+    assert len(report["results"][0]["presentation"]["coefficients"]) == 11
+
+
+def test_bad_input_and_safe_error(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("app.ctx", SimpleNamespace(triggered_id="run"))
+    assert update_result(1, "demo", *controls("custom"))
+
+    def fail(*_):
+        raise RuntimeError("secret licensed payload")
+
+    monkeypatch.setattr("app.run_study", fail)
+    output = update_result(1, "demo", *controls())
+    assert "Reference:" in str(output)
+    assert "secret licensed payload" not in str(output)
+
+
+def test_dash_layout():
+    client = app.server.test_client()
+    assert client.get("/").status_code == 200
+    assert client.get("/_dash-layout").status_code == 200
+
+
+def test_request_uses_factor_specs():
+    request = build_request(*controls())
+    assert len(request.skill_parameters["factor-regression"]["factors"]) == 6
