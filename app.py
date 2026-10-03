@@ -25,6 +25,11 @@ from trade_research.settings import Settings
 from trade_research.skills.factor_regression import FactorRegressionParameters
 
 WARNINGS = {
+    "original_high_collinearity": (
+        "Original factors overlap strongly. "
+        "Residualization does not create independent information; "
+        "review the original-model condition number and VIF alongside the selected basis."
+    ),
     "raw_returns_not_alpha": (
         "The intercept is not risk-adjusted alpha: this model has no risk- free rate."
     ),
@@ -290,7 +295,7 @@ def render_result(report, source):
     details.append(
         html.P(
             f"R²: {p['r_squared']:.1%} · Adjusted R²: {p['adjusted_r_squared']:.1%} · "
-            f"Covariance: {p['covariance']}"
+            f"Covariance: {p['covariance']} · Selected-basis condition: {p['condition_number']:.2f}"
         )
     )
     details.append(
@@ -327,10 +332,13 @@ def render_result(report, source):
     details.append(dcc.Graph(figure=chart))
     if p.get("rolling"):
         rolling = go.Figure()
+        by_date = {v["end_date"]: v for v in p["rolling"]}
+        plot_dates = sorted(set(by_date) | set(p["rolling_skipped_end_dates"]))
         for i, c in enumerate(coefficients[1:], 1):
             rolling.add_scatter(
-                x=[v["end_date"] for v in p["rolling"]],
-                y=[v["estimates"][i] for v in p["rolling"]],
+                x=plot_dates,
+                y=[by_date[d]["estimates"][i] if d in by_date else None for d in plot_dates],
+                connectgaps=False,
                 name=c["label"],
             )
         rolling.update_layout(title="Rolling exposures (original units)", template="plotly_white")
@@ -344,7 +352,15 @@ def render_result(report, source):
                     "Higher in-sample R² does not establish forecasting value."
                 ),
                 table(
-                    ["Model", "N", "R²", "Adjusted R²", "Residual volatility", "Condition number"],
+                    [
+                        "Model",
+                        "N",
+                        "R²",
+                        "Adjusted R²",
+                        "Residual volatility",
+                        "Condition number",
+                        "Collinearity",
+                    ],
                     [
                         [
                             m["name"],
@@ -353,6 +369,7 @@ def render_result(report, source):
                             f"{m['adjusted_r_squared']:.1%}",
                             f"{m['residual_volatility']:.4f}",
                             f"{m['condition_number']:.1f}",
+                            "High" if m["high_collinearity"] else "Not flagged",
                         ]
                         for m in p["comparisons"]
                     ],
@@ -361,11 +378,18 @@ def render_result(report, source):
                     [
                         html.Summary("How coefficients change across models"),
                         table(
-                            ["Model", "Factor", "Coefficient"],
+                            ["Model", "Factor", "Coefficient", "VIF"],
                             [
-                                [m["name"], c["label"], f"{c['estimate']:.5f}"]
+                                [
+                                    m["name"],
+                                    c["label"],
+                                    f"{c['estimate']:.5f}",
+                                    "—"
+                                    if i == 0
+                                    else f"{m['variance_inflation_factors'][i - 1]:.2f}",
+                                ]
                                 for m in p["comparisons"]
-                                for c in m["coefficients"]
+                                for i, c in enumerate(m["coefficients"])
                             ],
                         ),
                     ]
@@ -398,6 +422,17 @@ def render_result(report, source):
     details.append(html.H3("Rolling stability"))
     details.append(
         html.P(
+            f"Rolling window: {p['rolling_window']} observations; "
+            f"successful fits: {len(p['rolling'])}; "
+            f"skipped fits: {len(p['rolling_skipped_end_dates'])}."
+        )
+    )
+    if p["rolling_skipped_end_dates"]:
+        details.append(
+            html.P("Unavailable window end dates: " + ", ".join(p["rolling_skipped_end_dates"]))
+        )
+    details.append(
+        html.P(
             "Ranges and sign shares describe overlapping rolling windows, not confidence intervals "
             "or independent statistical tests. "
             "Small coefficients changing sign may be economically "
@@ -408,7 +443,17 @@ def render_result(report, source):
     if p.get("stability"):
         details.append(
             table(
-                ["Factor", "Windows", "Minimum", "Median", "Maximum", "Latest", "Positive share"],
+                [
+                    "Factor",
+                    "Windows",
+                    "Minimum",
+                    "Median",
+                    "Maximum",
+                    "Last valid estimate",
+                    "Last valid end",
+                    "Status",
+                    "Positive share",
+                ],
                 [
                     [
                         v["label"],
@@ -417,6 +462,8 @@ def render_result(report, source):
                         f"{v['median']:.4f}",
                         f"{v['maximum']:.4f}",
                         f"{v['latest']:.4f}",
+                        v["latest_end_date"],
+                        "Current" if v["latest_is_current"] else "Stale",
                         f"{v['positive_fraction']:.1%}",
                     ]
                     for v in p["stability"]

@@ -92,3 +92,36 @@ def test_comparisons_and_residualization_in_playground():
     assert "Model comparison" in rendered
     assert "Rolling stability" in rendered
     assert "Remaining variation" in rendered
+
+
+@pytest.mark.parametrize("frequency", ["daily", "monthly"])
+def test_demo_histories_are_independent_of_model_selection(frequency):
+    from demo_data import demo_request
+
+    base = list(controls(frequency=frequency))
+    with_extra = list(base)
+    with_extra[3] = "Sector | US:IHE"
+    subset = list(with_extra)
+    subset[2] = subset[2][:-1]
+    studies = [demo_request(build_request(*args)) for args in (base, with_extra, subset)]
+    targets = [
+        next(s.points for s in r.factor_series if s.instrument == r.instrument) for r in studies
+    ]
+    assert targets[0] == targets[1] == targets[2]
+    for a, b in zip(
+        studies[0].research_factors.points, studies[2].research_factors.points, strict=True
+    ):
+        assert all(a.values[k] == b.values[k] for k in b.values)
+
+
+def test_demo_date_extension_preserves_overlapping_history():
+    from demo_data import demo_request
+
+    args = list(controls())
+    first = demo_request(build_request(*args))
+    args[7] = "2016-01-01"
+    extended = demo_request(build_request(*args))
+    a = next(s for s in first.factor_series if s.instrument == first.instrument)
+    b = next(s for s in extended.factor_series if s.instrument == extended.instrument)
+    by_end = {p.end_date: p for p in b.points}
+    assert all(p == by_end[p.end_date] for p in a.points)

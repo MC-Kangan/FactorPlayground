@@ -110,3 +110,16 @@ Rolling minimum/median/maximum and sign shares are descriptive summaries of over
 windows, not confidence intervals. Change the rolling-window control to assess horizon
 sensitivity. See ../TradeAgent/docs/factor-model-comparison.md for assumptions and the
 synthetic European energy example. No PCA, ridge or prediction claims are introduced.
+
+
+## Review fixes
+
+Synthetic observations are now keyed by series identity, frequency and period date.
+Selecting, removing or reordering factors does not regenerate the stock or existing
+benchmarks. Extending a date range preserves overlapping observations. The fixed demo
+economy has shared market/value/momentum drivers plus asset-specific noise. Monthly
+and daily simulations remain separate synthetic datasets, not a resampling identity.
+
+Rolling summaries show the last valid fit date and mark stale estimates. Skipped window
+dates are listed, and charts leave gaps at failed fits. Original-model condition numbers,
+VIF and collinearity flags remain visible alongside residualized results.

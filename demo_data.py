@@ -1,5 +1,6 @@
 """Deterministic synthetic observations; never used for real investment conclusions."""
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -13,6 +14,21 @@ from trade_research.domain.models import (
 )
 from trade_research.skills.factor_data import month_end, session_dates
 from trade_research.skills.factor_regression import FactorRegressionParameters
+
+
+def innovations(key, labels, frequency):
+    """Stable per-series, per-period draws, independent of requested model or date range."""
+    return np.array(
+        [
+            np.random.default_rng(
+                int.from_bytes(
+                    hashlib.sha256(f"{frequency}|{key}|{day.isoformat()}".encode()).digest()[:8],
+                    "big",
+                )
+            ).standard_normal()
+            for day in labels
+        ]
+    )
 
 
 def demo_request(request):
@@ -35,29 +51,29 @@ def demo_request(request):
         intervals = [
             (b, a, b) for a, b in zip(dates[:-1], dates[1:], strict=False) if start <= b <= end
         ]
-    rng = np.random.default_rng(73)
-    n = len(intervals)
+    labels = [label for label, _, _ in intervals]
     scale = 0.01 if params.frequency == "daily" else 0.04
     cash = 0.0001 if params.frequency == "daily" else 0.002
-    histories = {asset: rng.normal(0, scale, n) for asset in params.benchmarks()}
+    # A fixed synthetic economy: model selection only chooses which inputs to expose.
+    research = {
+        d.id: scale * innovations("research:" + d.id, labels, params.frequency)
+        for d in FRENCH_DEFINITIONS
+    }
     research_keys = list(
         dict.fromkeys(f.research_key for f in params.selected_factors() if f.kind == "research")
     )
-    research = {key: rng.normal(0, scale, n) for key in research_keys}
-    target = rng.normal(0.0002, scale / 5, n)
-    for i, f in enumerate(params.selected_factors()):
-        if f.kind == "research":
-            column = research[f.research_key]
-        elif f.kind == "spread":
-            column = histories[f.instrument] - histories[f.short_instrument]
-        else:
-            column = histories[f.instrument] - (
-                cash if params.return_mode == "excess_return" else 0
-            )
-        target += (1.2 / (i + 1)) * column
-    if request.instrument in histories:
+    if request.instrument in params.benchmarks():
         raise ValueError("Target must differ from demo benchmarks.")
-    histories[request.instrument] = target + (cash if params.return_mode == "excess_return" else 0)
+    histories = {
+        asset: cash
+        + 1.2 * research["market_excess"]
+        + 0.4 * research["hml"]
+        + 0.2 * research["momentum"]
+        + 0.4
+        * scale
+        * innovations(f"asset:{asset.market}:{asset.symbol}", labels, params.frequency)
+        for asset in (request.instrument, *params.benchmarks())
+    }
     series = tuple(
         FactorReturnSeries(
             instrument=asset,
@@ -83,7 +99,6 @@ def demo_request(request):
             raise ValueError("Demo research keys must come from the French catalog.")
         if not research_keys:
             research_keys = ["market_excess"]
-            research = {"market_excess": rng.normal(0, scale, n)}
         update["research_factors"] = ResearchFactorPanel(
             region=params.region,
             frequency=params.frequency,
