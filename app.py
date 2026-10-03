@@ -81,8 +81,8 @@ WARNINGS = {
         "French research portfolios and vendor adjusted/gross/net returns may "
         "have different dividend conventions."
     ),
-    "industry_self_inclusion_unchecked": (
-        "The target may be a constituent of its industry benchmark; "
+    "benchmark_self_inclusion_unchecked": (
+        "The target may be a constituent of a selected benchmark; "
         "historical weights have not been checked."
     ),
     "influential_observations": (
@@ -117,6 +117,19 @@ def instrument(text):
     return InstrumentId(market=market.upper(), symbol=symbol.upper())
 
 
+def parse_lines(text):
+    """Small explicit editor: a name/target and comma-separated factor IDs."""
+    rows = []
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        name, separator, factors = line.partition("|")
+        if not separator or not name.strip():
+            raise ValueError("Use name or target | comma-separated factor IDs.")
+        rows.append((name.strip(), [v.strip() for v in factors.split(",") if v.strip()]))
+    return rows
+
+
 def build_request(
     stock,
     preset,
@@ -130,7 +143,8 @@ def build_request(
     minimum,
     rolling,
     lags,
-    baseline,
+    comparisons,
+    residualizations,
 ):
     factors = [
         f.model_dump(mode="json") for f in preset_factors(preset) if f.id in (selected or [])
@@ -167,7 +181,13 @@ def build_request(
             rolling_window=rolling,
             hac_lags=lags,
             max_factors=MAX_FACTOR_COUNT,
-            baseline_factor_ids=[v.strip() for v in (baseline or "").split(",") if v.strip()],
+            comparisons=[
+                {"name": name, "factor_ids": ids} for name, ids in parse_lines(comparisons)
+            ],
+            residualizations=[
+                {"factor_id": target, "against": ids}
+                for target, ids in parse_lines(residualizations)
+            ],
         )
     ).resolve_dates(TODAY)
     return AnalysisRequest(
@@ -315,12 +335,97 @@ def render_result(report, source):
             )
         rolling.update_layout(title="Rolling exposures (original units)", template="plotly_white")
         details.append(dcc.Graph(figure=rolling))
-    if p.get("baseline_r_squared") is not None:
+    if p.get("comparisons"):
+        details.extend(
+            [
+                html.H3("Model comparison"),
+                html.P(
+                    "All models below use original factors and exactly the same observations. "
+                    "Higher in-sample R² does not establish forecasting value."
+                ),
+                table(
+                    ["Model", "N", "R²", "Adjusted R²", "Residual volatility", "Condition number"],
+                    [
+                        [
+                            m["name"],
+                            m["sample_count"],
+                            f"{m['r_squared']:.1%}",
+                            f"{m['adjusted_r_squared']:.1%}",
+                            f"{m['residual_volatility']:.4f}",
+                            f"{m['condition_number']:.1f}",
+                        ]
+                        for m in p["comparisons"]
+                    ],
+                ),
+                html.Details(
+                    [
+                        html.Summary("How coefficients change across models"),
+                        table(
+                            ["Model", "Factor", "Coefficient"],
+                            [
+                                [m["name"], c["label"], f"{c['estimate']:.5f}"]
+                                for m in p["comparisons"]
+                                for c in m["coefficients"]
+                            ],
+                        ),
+                    ]
+                ),
+            ]
+        )
+    if p.get("residualizations"):
+        details.extend(
+            [
+                html.H3("Remaining variation"),
+                html.P(
+                    "Residualization removes the specified exposures within this sample. "
+                    "It changes attribution, not the full model's fitted returns. "
+                    "The remaining movement is not a causal shock. Controls are retained; "
+                    "rolling transformations are refitted inside each window."
+                ),
+                table(
+                    ["Factor", "Removed exposures", "Original variance remaining"],
+                    [
+                        [
+                            r["factor_id"],
+                            ", ".join(r["against"]),
+                            f"{r['remaining_variance_fraction']:.1%}",
+                        ]
+                        for r in p["residualizations"]
+                    ],
+                ),
+            ]
+        )
+    details.append(html.H3("Rolling stability"))
+    details.append(
+        html.P(
+            "Ranges and sign shares describe overlapping rolling windows, not confidence intervals "
+            "or independent statistical tests. "
+            "Small coefficients changing sign may be economically "
+            "unimportant. Change the rolling window to assess sensitivity. Residualized control "
+            "coefficients use a different attribution basis in each window."
+        )
+    )
+    if p.get("stability"):
         details.append(
-            html.P(
-                f"Selected baseline R²: {p['baseline_r_squared']:.1%}; "
-                f"additional explained variance: {p['incremental_r_squared']:.1%}."
+            table(
+                ["Factor", "Windows", "Minimum", "Median", "Maximum", "Latest", "Positive share"],
+                [
+                    [
+                        v["label"],
+                        v["window_count"],
+                        f"{v['minimum']:.4f}",
+                        f"{v['median']:.4f}",
+                        f"{v['maximum']:.4f}",
+                        f"{v['latest']:.4f}",
+                        f"{v['positive_fraction']:.1%}",
+                    ]
+                    for v in p["stability"]
+                ],
             )
+        )
+    else:
+        details.append(
+            html.P("No valid rolling fits. Extend history or adjust the rolling window.")
         )
     details.append(
         html.Details(
@@ -439,9 +544,39 @@ app.layout = html.Div(
                         dcc.Textarea(
                             id="advanced", value="", style={"width": "100%", "height": "140px"}
                         ),
+                    ]
+                ),
+                html.H3("Compare models"),
+                html.P(
+                    "One model per line: name | factor IDs. Select proper subsets of the "
+                    "full model. Preset IDs appear in brackets; additional factors use "
+                    "extra_0, extra_1, etc. based on their line position."
+                ),
+                field(
+                    "Named factor subsets",
+                    dcc.Textarea(
+                        id="comparisons",
+                        value="",
+                        placeholder="Market | market_excess",
+                        style={"width": "100%", "height": "85px"},
+                    ),
+                ),
+                html.Details(
+                    [
+                        html.Summary("Optional residualization"),
+                        html.P(
+                            "One factor per line: target ID | control IDs. Controls must remain "
+                            "in the full model and cannot themselves be residualized. "
+                            "This does not make all factors mutually independent."
+                        ),
                         field(
-                            "Baseline factor IDs (comma-separated strict subset)",
-                            dcc.Input(id="baseline", value=""),
+                            "Remove selected benchmark exposures",
+                            dcc.Textarea(
+                                id="residualizations",
+                                value="",
+                                placeholder="extra_0 | market_excess,hml",
+                                style={"width": "100%", "height": "85px"},
+                            ),
                         ),
                     ]
                 ),
@@ -473,14 +608,18 @@ CONTROL_IDS = (
     "minimum",
     "rolling",
     "lags",
-    "baseline",
+    "comparisons",
+    "residualizations",
 )
 
 
 @app.callback(Output("selected", "options"), Output("selected", "value"), Input("preset", "value"))
 def select_preset(preset):
     factors = preset_factors(preset)
-    return ([{"label": f.label, "value": f.id} for f in factors], [f.id for f in factors])
+    return (
+        [{"label": f"{f.label} [{f.id}]", "value": f.id} for f in factors],
+        [f.id for f in factors],
+    )
 
 
 @app.callback(
@@ -510,7 +649,8 @@ def update_result(_clicks, source, *controls):
     except (ValueError, ValidationError):
         return html.P(
             "Invalid settings. Check factor syntax, dates, unique IDs and sample size; "
-            "minimum and rolling windows must exceed the factor count plus HAC lags plus one."
+            "minimum and rolling windows must exceed the factor count plus HAC lags plus one. "
+            "Comparison IDs must be selected factors; residualization controls cannot be targets."
         )
     try:
         # Validation is intentionally separate from provider execution.

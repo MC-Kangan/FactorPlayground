@@ -19,6 +19,7 @@ def controls(preset="french", frequency="monthly", extra="", advanced=""):
         60 if frequency == "monthly" else 252,
         3,
         "",
+        "",
     )
 
 
@@ -77,3 +78,17 @@ def test_dash_layout():
 def test_request_uses_factor_specs():
     request = build_request(*controls())
     assert len(request.skill_parameters["factor-regression"]["factors"]) == 6
+
+
+def test_comparisons_and_residualization_in_playground():
+    args = list(controls(extra="Sector | US:IHE"))
+    args[-2] = "Market | market_excess\nMarket and sector | market_excess,extra_0"
+    args[-1] = "extra_0 | market_excess,hml"
+    report = run_study("demo", *args)
+    p = report["results"][0]["presentation"]
+    assert len(p["comparisons"]) == 3
+    assert p["residualizations"][0]["factor_id"] == "extra_0"
+    rendered = str(render_result(report, "demo"))
+    assert "Model comparison" in rendered
+    assert "Rolling stability" in rendered
+    assert "Remaining variation" in rendered

@@ -55,8 +55,7 @@ An optional JSON list replaces all simple selections above. For example:
 ]
 ```
 
-A spread has a short_instrument and optional short_calendar. Supply a comma-separated
-strict subset of selected IDs as the baseline to see same-sample incremental R².
+A spread has a short_instrument and optional short_calendar. Use the named-model editor to compare multiple strict subsets on identical observations.
 Additional factor IDs from the simple editor are extra_0, extra_1, etc., corresponding
 to line positions. Custom research columns need an injected normalized provider;
 the demo supports the French research catalog only.
@@ -91,3 +90,23 @@ PYTHONPATH="$PWD:$PWD/.venv/lib/python3.13/site-packages" ../TradeAgent/.venv/bi
 Adjust the Python minor-version directory to match the installed environments.
 Tests are offline: daily/monthly, both presets, subset plus multiple extra factors,
 ten-factor custom model, safe errors and Dash routes.
+
+
+## Model comparison and stability
+
+The factor engine stays sector-independent. The new controls accept:
+- Named models, one per line: `Market and sector | market_excess,extra_0`.
+- Optional residualization, one per line: `extra_0 | market_excess,hml`.
+
+Preset factor IDs appear in brackets in the selector. Additional factors use their
+zero-based line positions (extra_0, extra_1). Comparison subsets must be part of the
+selected full model. Controls must remain selected and cannot themselves be targets.
+
+The comparison table always uses original factors. Residualization changes the main
+coefficient table and rolling plot; it preserves the full fitted returns and shows
+the remaining variance of each transformed factor. This is attribution, not causality.
+
+Rolling minimum/median/maximum and sign shares are descriptive summaries of overlapping
+windows, not confidence intervals. Change the rolling-window control to assess horizon
+sensitivity. See ../TradeAgent/docs/factor-model-comparison.md for assumptions and the
+synthetic European energy example. No PCA, ridge or prediction claims are introduced.
