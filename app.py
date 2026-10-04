@@ -986,7 +986,8 @@ def single_stock_workspace():
                     html.Div("STUDY SETTINGS", className="eyebrow"),
                     html.H3("Configure the regression"),
                     help_text(
-                        "Start with the core inputs. Open advanced sections only when needed."
+                        "Choose the data source, stock and factor pack in Core setup. "
+                        "Manual factor entry is optional."
                     ),
                 ],
                 className="control-heading",
@@ -1131,7 +1132,6 @@ def single_stock_workspace():
                     ),
                     field("HAC lags", dcc.Input(id="lags", type="number", value=3)),
                 ],
-                open_by_default=True,
             ),
             settings_section(
                 "Manual factor entry · optional",

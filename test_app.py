@@ -132,6 +132,7 @@ def test_yaml_pack_is_directly_selectable_in_main_factor_controls():
     assert "YAML pack · Energy" in layout
     assert "Select factors from this pack" in layout
     assert "Model comparisons only · does not add factors" in layout
+    assert "Choose the data source, stock and factor pack in Core setup" in layout
 
 
 def test_all_dropdowns_are_non_searchable():
