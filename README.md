@@ -240,7 +240,10 @@ for learning and does not represent historical securities.
 ## YAML factor packs
 
 Place reusable definitions in `factor_packs/*.yaml` and restart the app. They appear
-in **Starting factor set**; select a pack and its factors load automatically. All
+in **Factor pack** with a `YAML pack ·` prefix; select a pack and its factors load
+automatically into **Select factors from this pack**, where individual factors can be
+included or removed. **Model comparisons only** never creates factors—it only compares
+subsets of the factors already selected. All
 selectors now show their choices without a search input. Set
 `FACTOR_PLAYGROUND_PACK_DIR` to use another local directory, such as a firm repo.
 

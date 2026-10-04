@@ -1027,27 +1027,34 @@ def single_stock_workspace():
                     ),
                     help_text("Examples: BME:REP for Repsol, US:AAPL, XETRA:SAP."),
                     field(
-                        "Starting factor set",
+                        "Factor pack",
                         dcc.Dropdown(
                             searchable=False,
                             id="preset",
                             options=[
-                                {"label": "Fama–French 5 + momentum", "value": "french"},
-                                {"label": "US ETF proxies", "value": "us_etf"},
                                 {
-                                    "label": "MSCI Europe · configured provider",
+                                    "label": "Built-in · Fama–French 5 + momentum",
+                                    "value": "french",
+                                },
+                                {"label": "Built-in · US ETF proxies", "value": "us_etf"},
+                                {
+                                    "label": "Built-in · MSCI Europe · configured provider",
                                     "value": "msci_europe",
                                 },
-                                {"label": "Custom factors", "value": "custom"},
                                 *[
                                     {
-                                        "label": pack.label
+                                        "label": "YAML pack · "
+                                        + pack.label.replace("\\xB7", "·")
                                         + (" · configure YAML first" if not pack.enabled else ""),
                                         "value": "pack:" + pack.id,
                                         "disabled": not pack.enabled,
                                     }
                                     for pack in FACTOR_PACKS.values()
                                 ],
+                                {
+                                    "label": "Blank model · add benchmarks manually below",
+                                    "value": "custom",
+                                },
                             ],
                             value="french",
                             clearable=False,
@@ -1055,11 +1062,13 @@ def single_stock_workspace():
                     ),
                     html.Div(id="pack-summary", className="help-text"),
                     field(
-                        "Factors in this run",
+                        "Select factors from this pack",
                         dcc.Dropdown(searchable=False, id="selected", multi=True),
                     ),
                     help_text(
-                        "Remove factors to test a smaller model. IDs remain visible for model comparisons."
+                        "A YAML pack loads its factors here automatically. Select or remove individual "
+                        "factors before running. Disabled YAML packs must be configured and enabled in "
+                        "their files, then the app must be restarted."
                     ),
                     field(
                         "Frequency",
@@ -1125,8 +1134,9 @@ def single_stock_workspace():
                 open_by_default=True,
             ),
             settings_section(
-                "Custom factors",
-                "Add funded benchmarks or spreads without changing backend code.",
+                "Manual factor entry · optional",
+                "Use this only for one-off funded benchmarks or spreads. "
+                "Prefer a YAML pack for reusable factors.",
                 [
                     field(
                         "One factor per line",
@@ -1160,7 +1170,7 @@ def single_stock_workspace():
                 "Compare nested models or remove selected benchmark exposure for attribution.",
                 [
                     field(
-                        "Named factor subsets",
+                        "Model comparisons only · does not add factors",
                         dcc.Textarea(
                             id="comparisons",
                             value="",
@@ -1168,7 +1178,10 @@ def single_stock_workspace():
                             className="code-input short",
                         ),
                     ),
-                    help_text("Format: model name | comma-separated factor IDs."),
+                    help_text(
+                        "Optional: compare subsets of factors already selected above. "
+                        "Format: model name | comma-separated factor IDs."
+                    ),
                     field(
                         "Attribution method",
                         dcc.Dropdown(

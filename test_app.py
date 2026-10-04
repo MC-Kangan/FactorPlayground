@@ -87,7 +87,7 @@ def test_dash_layout():
     assert client.get("/").status_code == 200
     response = client.get("/_dash-layout")
     assert response.status_code == 200
-    layout = json.dumps(response.get_json())
+    layout = json.dumps(response.get_json(), ensure_ascii=False)
     assert '"workspace-tabs"' in layout
     assert "Single-stock attribution" in layout
     assert "Cross-sectional signals" in layout
@@ -123,6 +123,15 @@ def test_yaml_pack_end_to_end_and_subset():
     coefficients = report["results"][0]["presentation"]["coefficients"]
     assert len(coefficients) == 3
     assert "Fama–French" in data_source_guidance("yahoo")
+
+
+def test_yaml_pack_is_directly_selectable_in_main_factor_controls():
+    response = app.server.test_client().get("/_dash-layout")
+    layout = json.dumps(response.get_json(), ensure_ascii=False)
+
+    assert "YAML pack · Energy" in layout
+    assert "Select factors from this pack" in layout
+    assert "Model comparisons only · does not add factors" in layout
 
 
 def test_all_dropdowns_are_non_searchable():
