@@ -13,8 +13,8 @@ import webbrowser
 from datetime import UTC, datetime, timedelta
 
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, ctx, dcc, html
-from demo_data import demo_request
+from dash import Dash, Input, Output, State, dcc, html
+from demo_data import cross_section_demo_request, demo_request
 from pydantic import ValidationError
 
 from trade_research.domain import AnalysisRequest, InstrumentId
@@ -22,6 +22,10 @@ from trade_research.domain.factors import preset_factors
 from trade_research.domain.models import MAX_FACTOR_COUNT
 from trade_research.engine import ResearchEngine
 from trade_research.settings import Settings
+from trade_research.skills.cross_sectional_signal import (
+    CrossSectionalSignalParameters,
+    CrossSectionUniverseMember,
+)
 from trade_research.skills.factor_regression import FactorRegressionParameters
 
 WARNINGS = {
@@ -218,6 +222,232 @@ def run_study(source, *controls):
     )
 
 
+def parse_universe(text):
+    """Parse MARKET:SYMBOL | sector | country | optional from | optional to."""
+    members = []
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if not 1 <= len(parts) <= 5:
+            raise ValueError("Invalid universe row")
+        members.append(
+            CrossSectionUniverseMember(
+                instrument=instrument(parts[0]),
+                sector=parts[1] if len(parts) > 1 and parts[1] else None,
+                country=parts[2].upper() if len(parts) > 2 and parts[2] else None,
+                member_from=parts[3] if len(parts) > 3 and parts[3] else None,
+                member_to=parts[4] if len(parts) > 4 and parts[4] else None,
+            )
+        )
+    if len(members) < 3:
+        raise ValueError("At least three universe members are required")
+    if len({member.instrument for member in members}) != len(members):
+        raise ValueError("Universe instruments must be unique")
+    return tuple(members)
+
+
+def build_cross_section_request(
+    universe,
+    universe_mode,
+    grouping,
+    start,
+    end,
+    quantiles,
+    minimum_assets,
+    minimum_group_assets,
+    cost_bps,
+    holdout_start,
+):
+    members = parse_universe(universe)
+    parameters = CrossSectionalSignalParameters.model_validate(
+        {
+            "start_date": start,
+            "end_date": end,
+            "quantiles": quantiles,
+            "minimum_assets": minimum_assets,
+            "universe_mode": universe_mode,
+            "members": [member.model_dump(mode="json") for member in members],
+            "grouping": grouping,
+            "minimum_group_assets": minimum_group_assets,
+            "transaction_cost_bps": cost_bps,
+            "holdout_start_date": holdout_start or None,
+        }
+    ).resolve_dates(TODAY).validate_instruments(tuple(m.instrument for m in members))
+    return AnalysisRequest(
+        instrument=InstrumentId(symbol="BASKET", market="PORTFOLIO"),
+        scope="portfolio",
+        portfolio_instruments=tuple(member.instrument for member in members),
+        analysts=("cross-sectional-signal",),
+        skill_parameters={
+            "cross-sectional-signal": parameters.model_dump(mode="json")
+        },
+    )
+
+
+def run_cross_section_study(source, *controls):
+    request = build_cross_section_request(*controls)
+    if source == "demo":
+        request = cross_section_demo_request(request)
+        settings = Settings()
+    elif source == "yahoo":
+        settings = Settings(price_provider="yahoo")
+    elif source == "configured":
+        settings = Settings.from_environment(os.environ)
+    else:
+        raise ValueError("Choose a data source")
+    return asyncio.run(ResearchEngine.from_settings(settings).analyze(request)).model_dump(
+        mode="json"
+    )
+
+
+def _percent(value):
+    return "—" if value is None else f"{100 * value:.2f}%"
+
+
+def _number(value):
+    return "—" if value is None else f"{value:.3f}"
+
+
+def finish_figure(figure, title, *, yaxis_title=None, percent_axis=False):
+    figure.update_layout(
+        title={"text": title, "font": {"size": 15, "color": "#17344d"}},
+        template="plotly_white",
+        height=390,
+        margin={"l": 52, "r": 22, "t": 62, "b": 45},
+        hovermode="x unified",
+        colorway=["#116653", "#3c6e9b", "#c08a36", "#765c91", "#819a56"],
+        legend={"orientation": "h", "y": 1.1, "x": 1, "xanchor": "right"},
+        yaxis={
+            "title": yaxis_title,
+            "tickformat": ".1%" if percent_axis else None,
+            "gridcolor": "#e7ece9",
+            "zerolinecolor": "#b9c6c0",
+        },
+        xaxis={"gridcolor": "#eef2f0"},
+    )
+    return figure
+
+
+def graph(figure):
+    return dcc.Graph(
+        figure=figure,
+        config={"displaylogo": False, "responsive": True, "scrollZoom": False},
+    )
+
+
+def render_cross_section_result(report, source):
+    result = report["results"][0]
+    p = result.get("presentation")
+    if not p:
+        return html.P("The provider could not complete this cross-sectional study.")
+    valid = [row for row in p["periods"] if row["rank_ic"] is not None]
+    ic_chart = go.Figure()
+    ic_chart.add_scatter(
+        x=[row["formation_date"] for row in valid],
+        y=[row["rank_ic"] for row in valid],
+        mode="lines+markers",
+        name="Monthly rank IC",
+    )
+    ic_chart.add_hline(y=0, line_color="#8b98a7", line_dash="dot")
+    finish_figure(ic_chart, "Rank IC through time", yaxis_title="Spearman IC")
+    quantile_chart = go.Figure(
+        go.Bar(
+            x=[f"Q{row['quantile']}" for row in p["average_quantile_returns"]],
+            y=[row["mean_forward_return"] for row in p["average_quantile_returns"]],
+        )
+    )
+    finish_figure(
+        quantile_chart,
+        "Average next-period return by score quantile",
+        percent_axis=True,
+    )
+    wealth_top = []
+    wealth_universe = []
+    top_value = universe_value = 1.0
+    for row in valid:
+        top_value *= 1 + row["net_top_return"]
+        universe_value *= 1 + row["universe_return"]
+        wealth_top.append(top_value)
+        wealth_universe.append(universe_value)
+    portfolio_chart = go.Figure()
+    portfolio_chart.add_scatter(
+        x=[row["formation_date"] for row in valid], y=wealth_top, name="Top quantile net"
+    )
+    portfolio_chart.add_scatter(
+        x=[row["formation_date"] for row in valid],
+        y=wealth_universe,
+        name="Eligible universe",
+    )
+    finish_figure(portfolio_chart, "Growth of one research unit", yaxis_title="Research units")
+    metrics = table(
+        ("Measure", "Result"),
+        (
+            ("Mean IC", _number(p["average_rank_ic"])),
+            ("Median IC", _number(p["median_rank_ic"])),
+            ("IC information ratio", _number(p["rank_ic_information_ratio"])),
+            ("Positive IC share", _percent(p["positive_rank_ic_fraction"])),
+            (
+                "Block-bootstrap 95% interval",
+                f"[{_number(p['rank_ic_lower_95'])}, {_number(p['rank_ic_upper_95'])}]",
+            ),
+            ("Annualized top return after cost", _percent(p["annualized_net_top_return"])),
+            ("Annualized universe return", _percent(p["annualized_universe_return"])),
+            ("Top portfolio max drawdown", _percent(p["net_top_max_drawdown"])),
+            ("Average turnover", _percent(p["average_top_turnover"])),
+        ),
+    )
+    children = [
+        html.H2("Cross-sectional results"),
+        html.P(
+            f"{p['universe_mode'].replace('_', ' ')} · {p['grouping'].replace('_', ' ')} "
+            f"ranking · {len(p['coverage'])} stocks · {p['transaction_cost_bps']:.1f} bps cost"
+        ),
+        html.Ul([html.Li(item.replace("_", " ")) for item in p["diagnostics"]]),
+        metrics,
+        graph(ic_chart),
+        graph(quantile_chart),
+        graph(portfolio_chart),
+    ]
+    if p["segments"]:
+        children.extend(
+            [
+                html.H3("Development and holdout"),
+                table(
+                    (
+                        "Segment",
+                        "Dates",
+                        "Periods",
+                        "Purged",
+                        "Mean IC",
+                        "Top excess",
+                        "Net annualized",
+                    ),
+                    [
+                        (
+                            row["name"],
+                            f"{row['start_date']} to {row['end_date']}",
+                            row["period_count"],
+                            row["purged_period_count"],
+                            _number(row["average_rank_ic"]),
+                            _percent(row["average_top_excess_return"]),
+                            _percent(row["annualized_net_top_return"]),
+                        )
+                        for row in p["segments"]
+                    ],
+                ),
+            ]
+        )
+    if source == "demo":
+        children.append(html.P("Synthetic learning data; these are not market results."))
+    children.append(
+        html.Details(
+            [html.Summary("Full diagnostics and metadata"), html.Pre(json.dumps(p, indent=2))]
+        )
+    )
+    return html.Div(children)
+
+
 def table(headings, rows):
     return html.Div(
         html.Table(
@@ -226,7 +456,7 @@ def table(headings, rows):
                 html.Tbody([html.Tr([html.Td(v) for v in row]) for row in rows]),
             ]
         ),
-        style={"overflowX": "auto"},
+        className="table-scroll",
     )
 
 
@@ -326,10 +556,12 @@ def render_result(report, source):
             y=[c["standardized_effect"] for c in coefficients[1:]],
         )
     )
-    chart.update_layout(
-        title="Standardized effects (comparable across units)", template="plotly_white"
+    finish_figure(
+        chart,
+        "Standardized effects (comparable across units)",
+        yaxis_title="Standardized coefficient",
     )
-    details.append(dcc.Graph(figure=chart))
+    details.append(graph(chart))
     if p.get("rolling"):
         rolling = go.Figure()
         by_date = {v["end_date"]: v for v in p["rolling"]}
@@ -341,8 +573,8 @@ def render_result(report, source):
                 connectgaps=False,
                 name=c["label"],
             )
-        rolling.update_layout(title="Rolling exposures (original units)", template="plotly_white")
-        details.append(dcc.Graph(figure=rolling))
+        finish_figure(rolling, "Rolling exposures (original units)", yaxis_title="Coefficient")
+        details.append(graph(rolling))
     if p.get("comparisons"):
         details.extend(
             [
@@ -489,157 +721,488 @@ def field(label, control):
     return html.Div([html.Label(label), control], className="field")
 
 
+def help_text(text):
+    return html.P(text, className="help-text")
+
+
+def settings_section(title, description, children, *, open_by_default=False):
+    return html.Details(
+        [
+            html.Summary(
+                [
+                    html.Span(title),
+                    html.Small("Hide" if open_by_default else "Show"),
+                ]
+            ),
+            html.P(description, className="section-description"),
+            html.Div(children, className="settings-section-body"),
+        ],
+        open=open_by_default,
+        className="settings-section",
+    )
+
+
+def empty_state(title, description, steps):
+    return html.Div(
+        [
+            html.Div("READY", className="empty-kicker"),
+            html.H2(title),
+            html.P(description),
+            html.Div(
+                [
+                    html.Div(
+                        [html.Strong(f"0{index}"), html.H3(step_title), html.P(step_body)]
+                    )
+                    for index, (step_title, step_body) in enumerate(steps, start=1)
+                ],
+                className="steps",
+            ),
+        ],
+        className="empty",
+    )
+
+
+def workspace_header(kicker, title, description, badges):
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(kicker, className="eyebrow"),
+                    html.H2(title),
+                    html.P(description),
+                ]
+            ),
+            html.Div([html.Span(badge, className="badge") for badge in badges], className="badges"),
+        ],
+        className="workspace-header",
+    )
+
+
+def single_stock_workspace():
+    controls = html.Aside(
+        [
+            html.Div(
+                [
+                    html.Div("STUDY SETTINGS", className="eyebrow"),
+                    html.H3("Configure the regression"),
+                    help_text("Start with the core inputs. Open advanced sections only when needed."),
+                ],
+                className="control-heading",
+            ),
+            settings_section(
+                "Core setup",
+                "Select the target, source, factor family and analysis frequency.",
+                [
+                    field(
+                        "Data source",
+                        dcc.Dropdown(
+                            id="source",
+                            options=[
+                                {"label": "Synthetic demo · offline", "value": "demo"},
+                                {"label": "Yahoo + French factors", "value": "yahoo"},
+                                {"label": "Configured providers · Bloomberg ready", "value": "configured"},
+                            ],
+                            value="demo",
+                            clearable=False,
+                        ),
+                    ),
+                    field(
+                        "Stock identifier",
+                        dcc.Input(
+                            id="stock",
+                            value="US:AAPL",
+                            placeholder="MARKET:SYMBOL",
+                        ),
+                    ),
+                    field(
+                        "Starting factor set",
+                        dcc.Dropdown(
+                            id="preset",
+                            options=[
+                                {"label": "Fama–French 5 + momentum", "value": "french"},
+                                {"label": "US ETF proxies", "value": "us_etf"},
+                                {"label": "Custom factors", "value": "custom"},
+                            ],
+                            value="french",
+                            clearable=False,
+                        ),
+                    ),
+                    field("Factors in this run", dcc.Dropdown(id="selected", multi=True)),
+                    help_text(
+                        "Remove factors to test a smaller model. IDs remain visible for model comparisons."
+                    ),
+                    field(
+                        "Frequency",
+                        dcc.Dropdown(
+                            id="frequency",
+                            options=[
+                                {"label": "Monthly · recommended start", "value": "monthly"},
+                                {"label": "Daily", "value": "daily"},
+                            ],
+                            value="monthly",
+                            clearable=False,
+                        ),
+                    ),
+                    field(
+                        "Research factor region",
+                        dcc.Dropdown(
+                            id="region", options=["US", "Europe"], value="US", clearable=False
+                        ),
+                    ),
+                ],
+                open_by_default=True,
+            ),
+            settings_section(
+                "Study window",
+                "Define the sample and the minimum evidence required for a fit.",
+                [
+                    html.Div(
+                        [
+                            field(
+                                "Start date",
+                                dcc.Input(
+                                    id="start",
+                                    value=str(TODAY - timedelta(days=3652)),
+                                    type="text",
+                                ),
+                            ),
+                            field(
+                                "End date",
+                                dcc.Input(
+                                    id="end",
+                                    value=str(TODAY - timedelta(days=1)),
+                                    type="text",
+                                ),
+                            ),
+                        ],
+                        className="two-column-fields",
+                    ),
+                    field(
+                        "Minimum observations",
+                        dcc.Input(id="minimum", type="number", value=60),
+                    ),
+                    field(
+                        "Rolling window · observations",
+                        dcc.Input(id="rolling", type="number", value=60),
+                    ),
+                    field("HAC lags", dcc.Input(id="lags", type="number", value=3)),
+                ],
+                open_by_default=True,
+            ),
+            settings_section(
+                "Custom factors",
+                "Add funded benchmarks or spreads without changing backend code.",
+                [
+                    field(
+                        "One factor per line",
+                        dcc.Textarea(
+                            id="extra",
+                            value="",
+                            placeholder="Pharma | US:IHE\nEnergy spread | US:XLE | US:IWB",
+                            className="code-input short",
+                        ),
+                    ),
+                    help_text(
+                        "Format: Label | long benchmark | optional short benchmark. Use total-return instruments."
+                    ),
+                    field(
+                        "Advanced factor definitions · JSON",
+                        dcc.Textarea(
+                            id="advanced",
+                            value="",
+                            placeholder='[{"id": "market", "kind": "research", ...}]',
+                            className="code-input",
+                        ),
+                    ),
+                    help_text(
+                        f"JSON replaces the selections above. Maximum {MAX_FACTOR_COUNT} factors, subject to sample size."
+                    ),
+                ],
+            ),
+            settings_section(
+                "Model diagnostics",
+                "Compare nested models or remove selected benchmark exposure for attribution.",
+                [
+                    field(
+                        "Named factor subsets",
+                        dcc.Textarea(
+                            id="comparisons",
+                            value="",
+                            placeholder="Market | market_excess",
+                            className="code-input short",
+                        ),
+                    ),
+                    help_text("Format: model name | comma-separated factor IDs."),
+                    field(
+                        "Residualize selected factors",
+                        dcc.Textarea(
+                            id="residualizations",
+                            value="",
+                            placeholder="extra_0 | market_excess,hml",
+                            className="code-input short",
+                        ),
+                    ),
+                    help_text(
+                        "Format: target factor ID | control IDs. This changes attribution, not fitted returns."
+                    ),
+                ],
+            ),
+            html.Button("Run single-stock analysis", id="run", n_clicks=0, className="primary"),
+            html.P("Results refresh only when you run the study.", className="run-note"),
+        ],
+        className="control-panel",
+    )
+    results = html.Main(
+        dcc.Loading(
+            html.Div(
+                id="result",
+                children=empty_state(
+                    "Explain a stock's historical returns",
+                    "Estimate factor exposures, inspect collinearity and see how coefficients change through time.",
+                    [
+                        ("Choose", "Set a stock, data source and factor family."),
+                        ("Refine", "Remove factors or add benchmarks relevant to your thesis."),
+                        ("Interpret", "Review coverage first, then exposures and stability."),
+                    ],
+                ),
+            ),
+            type="circle",
+        ),
+        className="results-panel",
+    )
+    return html.Div(
+        [
+            workspace_header(
+                "TIME-SERIES ATTRIBUTION",
+                "Single-stock analysis",
+                "Explain one stock's historical returns with research factors, traded benchmarks and custom spreads.",
+                ["Regression", "Rolling exposure", "Collinearity"],
+            ),
+            html.Div([controls, results], className="workspace-grid"),
+        ],
+        className="workspace",
+    )
+
+
+def cross_section_workspace():
+    controls = html.Aside(
+        [
+            html.Div(
+                [
+                    html.Div("STUDY SETTINGS", className="eyebrow"),
+                    html.H3("Configure the signal test"),
+                    help_text("Rank an editable universe and evaluate subsequent returns."),
+                ],
+                className="control-heading",
+            ),
+            settings_section(
+                "Universe and ranking",
+                "Choose the data source, membership history and neutralization groups.",
+                [
+                    field(
+                        "Data source",
+                        dcc.Dropdown(
+                            id="cs-source",
+                            options=[
+                                {"label": "Synthetic demo · offline", "value": "demo"},
+                                {"label": "Yahoo adjusted returns", "value": "yahoo"},
+                                {"label": "Configured backend provider", "value": "configured"},
+                            ],
+                            value="demo",
+                            clearable=False,
+                        ),
+                    ),
+                    field(
+                        "Universe editor",
+                        dcc.Textarea(
+                            id="cs-universe",
+                            value=(
+                                "US:XOM | Energy | US\nUS:CVX | Energy | US\n"
+                                "US:COP | Energy | US\nUS:SLB | Energy | US\nUS:EOG | Energy | US\n"
+                                "US:LLY | Health Care | US\nUS:JNJ | Health Care | US\n"
+                                "US:MRK | Health Care | US\nUS:ABBV | Health Care | US\n"
+                                "US:AMGN | Health Care | US"
+                            ),
+                            className="code-input universe-input",
+                        ),
+                    ),
+                    help_text(
+                        "MARKET:SYMBOL | sector | country | optional member-from | optional member-to"
+                    ),
+                    field(
+                        "Universe history",
+                        dcc.Dropdown(
+                            id="cs-universe-mode",
+                            options=[
+                                {"label": "Current watchlist · exploratory", "value": "current_watchlist"},
+                                {"label": "Point-in-time membership", "value": "point_in_time"},
+                            ],
+                            value="current_watchlist",
+                            clearable=False,
+                        ),
+                    ),
+                    field(
+                        "Ranking basis",
+                        dcc.Dropdown(
+                            id="cs-grouping",
+                            options=[
+                                {"label": "Whole universe", "value": "overall"},
+                                {"label": "Within sector", "value": "sector"},
+                                {"label": "Within country", "value": "country"},
+                                {"label": "Within sector and country", "value": "sector_country"},
+                            ],
+                            value="overall",
+                            clearable=False,
+                        ),
+                    ),
+                ],
+                open_by_default=True,
+            ),
+            settings_section(
+                "Evaluation window",
+                "Use a chronological holdout to separate signal design from evaluation.",
+                [
+                    html.Div(
+                        [
+                            field(
+                                "Start date",
+                                dcc.Input(
+                                    id="cs-start",
+                                    value=str(TODAY - timedelta(days=365 * 6)),
+                                    type="text",
+                                ),
+                            ),
+                            field(
+                                "End date",
+                                dcc.Input(
+                                    id="cs-end",
+                                    value=str(TODAY - timedelta(days=1)),
+                                    type="text",
+                                ),
+                            ),
+                        ],
+                        className="two-column-fields",
+                    ),
+                    field(
+                        "Holdout start · optional",
+                        dcc.Input(
+                            id="cs-holdout",
+                            value=str(TODAY - timedelta(days=365 * 2)),
+                            type="text",
+                        ),
+                    ),
+                ],
+                open_by_default=True,
+            ),
+            settings_section(
+                "Portfolio construction",
+                "Control portfolio breadth, group eligibility and illustrative trading cost.",
+                [
+                    field("Quantiles", dcc.Input(id="cs-quantiles", value=5, type="number")),
+                    field(
+                        "Minimum total assets",
+                        dcc.Input(id="cs-minimum-assets", value=10, type="number"),
+                    ),
+                    field(
+                        "Minimum assets per group",
+                        dcc.Input(id="cs-minimum-group", value=5, type="number"),
+                    ),
+                    field(
+                        "One-way cost · bps per unit turnover",
+                        dcc.Input(id="cs-cost", value=10, type="number"),
+                    ),
+                    help_text(
+                        "Grouped runs need enough eligible stocks in each group to form every quantile."
+                    ),
+                ],
+            ),
+            html.Button(
+                "Run cross-sectional analysis",
+                id="cs-run",
+                n_clicks=0,
+                className="primary",
+            ),
+            html.P("Results refresh only when you run the study.", className="run-note"),
+        ],
+        className="control-panel",
+    )
+    results = html.Main(
+        dcc.Loading(
+            html.Div(
+                id="cs-result",
+                children=empty_state(
+                    "Test whether a signal ranks future returns",
+                    "Evaluate 12–1 momentum with rank IC, quantile returns, turnover, costs and a chronological holdout.",
+                    [
+                        ("Define", "Enter an investable universe with sector and country metadata."),
+                        ("Rank", "Choose whole-universe or group-neutral ranking."),
+                        ("Validate", "Compare development and holdout behavior after costs."),
+                    ],
+                ),
+            ),
+            type="circle",
+        ),
+        className="results-panel",
+    )
+    return html.Div(
+        [
+            workspace_header(
+                "SIGNAL VALIDATION",
+                "Cross-sectional analysis",
+                "Test whether a ranking signal separates subsequent returns across an editable stock universe.",
+                ["Rank IC", "Quantiles", "Holdout"],
+            ),
+            html.Div([controls, results], className="workspace-grid"),
+        ],
+        className="workspace",
+    )
+
+
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 app = Dash(__name__, title="Factor Playground")
 app.layout = html.Div(
     [
-        html.H1("Factor Playground"),
-        html.P(
-            "Choose a stock, select factors and run a historical explanatory study. "
-            "Start with the synthetic demo; monthly data is a useful starting point for Europe."
-        ),
-        html.Div(
+        html.Header(
             [
-                field(
-                    "Data source",
-                    dcc.Dropdown(
-                        id="source",
-                        options=[
-                            {"label": "Synthetic demo (offline)", "value": "demo"},
-                            {"label": "Yahoo + French research factors", "value": "yahoo"},
-                            {
-                                "label": "Configured backend providers (including Bloomberg)",
-                                "value": "configured",
-                            },
-                        ],
-                        value="demo",
-                        clearable=False,
-                    ),
-                ),
-                field(
-                    "Stock: MARKET:SYMBOL",
-                    dcc.Input(id="stock", value="US:AAPL", style={"width": "100%"}),
-                ),
-                field(
-                    "Starting factor set",
-                    dcc.Dropdown(
-                        id="preset",
-                        options=[
-                            {"label": "Fama–French 5 + momentum", "value": "french"},
-                            {"label": "US ETF proxies", "value": "us_etf"},
-                            {"label": "Custom factors", "value": "custom"},
-                        ],
-                        value="french",
-                        clearable=False,
-                    ),
-                ),
-                field("Selected factors (remove any)", dcc.Dropdown(id="selected", multi=True)),
-                field(
-                    "Additional factors: one per line",
-                    dcc.Textarea(
-                        id="extra",
-                        value="",
-                        placeholder="Pharma | US:IHE\nEnergy spread | US:XLE | US:IWB",
-                        style={"width": "100%", "height": "90px"},
-                    ),
-                ),
-                html.P(
-                    "Format: Label | long benchmark | optional short benchmark. "
-                    "Use total-return instruments. "
-                    "ETF sector exposure is not a pure industry shock."
-                ),
-                field(
-                    "Frequency",
-                    dcc.Dropdown(
-                        id="frequency",
-                        options=["daily", "monthly"],
-                        value="monthly",
-                        clearable=False,
-                    ),
-                ),
-                field(
-                    "Research factor region",
-                    dcc.Dropdown(
-                        id="region", options=["US", "Europe"], value="US", clearable=False
-                    ),
-                ),
-                field(
-                    "Start date",
-                    dcc.Input(id="start", value=str(TODAY - timedelta(days=3652)), type="text"),
-                ),
-                field(
-                    "End date (completed history)",
-                    dcc.Input(id="end", value=str(TODAY - timedelta(days=1)), type="text"),
-                ),
-                field("Minimum observations", dcc.Input(id="minimum", type="number", value=60)),
-                field(
-                    "Rolling window (observations)",
-                    dcc.Input(id="rolling", type="number", value=60),
-                ),
-                field("HAC lags (observations)", dcc.Input(id="lags", type="number", value=3)),
-                html.Details(
+                html.Div(
                     [
-                        html.Summary("Advanced factor definitions"),
+                        html.Div("TRADE RESEARCH", className="eyebrow"),
+                        html.H1("Factor Playground"),
                         html.P(
-                            "Optional JSON replaces the selections above. "
-                            "Supports asset_return, spread and "
-                            "research kinds, per-leg calendars, labels and IDs. "
-                            f"Up to {MAX_FACTOR_COUNT} factors, subject to sample size. "
-                            "Custom research inputs need a provider "
-                            "implementing the normalized panel contract."
-                        ),
-                        dcc.Textarea(
-                            id="advanced", value="", style={"width": "100%", "height": "140px"}
+                            "A local research console for transparent factor attribution and signal validation."
                         ),
                     ]
                 ),
-                html.H3("Compare models"),
-                html.P(
-                    "One model per line: name | factor IDs. Select proper subsets of the "
-                    "full model. Preset IDs appear in brackets; additional factors use "
-                    "extra_0, extra_1, etc. based on their line position."
-                ),
-                field(
-                    "Named factor subsets",
-                    dcc.Textarea(
-                        id="comparisons",
-                        value="",
-                        placeholder="Market | market_excess",
-                        style={"width": "100%", "height": "85px"},
-                    ),
-                ),
-                html.Details(
-                    [
-                        html.Summary("Optional residualization"),
-                        html.P(
-                            "One factor per line: target ID | control IDs. Controls must remain "
-                            "in the full model and cannot themselves be residualized. "
-                            "This does not make all factors mutually independent."
-                        ),
-                        field(
-                            "Remove selected benchmark exposures",
-                            dcc.Textarea(
-                                id="residualizations",
-                                value="",
-                                placeholder="extra_0 | market_excess,hml",
-                                style={"width": "100%", "height": "85px"},
-                            ),
-                        ),
-                    ]
-                ),
-                html.Button("Run factor analysis", id="run", n_clicks=0, className="primary"),
-            ],
-            style={"padding": "24px", "background": "#f5f7fa", "borderRadius": "12px"},
+                html.Div("LOCAL · ANALYTICS ONLY", className="lab"),
+            ]
         ),
-        dcc.Loading(html.Div(id="result", style={"marginTop": "24px"})),
+        dcc.Tabs(
+            id="workspace-tabs",
+            value="single-stock",
+            className="workspace-tabs",
+            parent_className="workspace-tabs-wrap",
+            children=[
+                dcc.Tab(
+                    label="Single-stock attribution",
+                    value="single-stock",
+                    className="workspace-tab",
+                    selected_className="workspace-tab--selected",
+                    children=single_stock_workspace(),
+                ),
+                dcc.Tab(
+                    label="Cross-sectional signals",
+                    value="cross-sectional",
+                    className="workspace-tab",
+                    selected_className="workspace-tab--selected",
+                    children=cross_section_workspace(),
+                ),
+            ],
+        ),
+        html.Footer(
+            "Local research interface · calculations and provider normalization run in TradeAgent"
+        ),
     ],
-    style={
-        "maxWidth": "1100px",
-        "margin": "30px auto",
-        "padding": "24px",
-        "fontFamily": "system-ui, sans-serif",
-        "color": "#142a43",
-    },
+    className="shell",
 )
 
 CONTROL_IDS = (
@@ -683,14 +1246,12 @@ def frequency_defaults(frequency):
 @app.callback(
     Output("result", "children"),
     Input("run", "n_clicks"),
-    Input("source", "value"),
-    *[Input(k, "value") for k in CONTROL_IDS],
+    State("source", "value"),
+    *[State(k, "value") for k in CONTROL_IDS],
     prevent_initial_call=True,
     running=[(Output("run", "disabled"), True, False)],
 )
 def update_result(_clicks, source, *controls):
-    if ctx.triggered_id != "run":
-        return html.P("Settings changed. Click Run factor analysis to refresh the results.")
     try:
         request = build_request(*controls)
     except (ValueError, ValidationError):
@@ -707,6 +1268,52 @@ def update_result(_clicks, source, *controls):
         reference = uuid.uuid4().hex
         logging.getLogger(__name__).error(
             "factor study stage=execution code=%s reference=%s", type(error).__name__, reference
+        )
+        return html.P(
+            f"Study failed. Stage: execution · Code: {type(error).__name__} · "
+            f"Reference: {reference}. Check provider configuration. Raw payloads are not logged."
+        )
+
+
+CS_CONTROL_IDS = (
+    "cs-universe",
+    "cs-universe-mode",
+    "cs-grouping",
+    "cs-start",
+    "cs-end",
+    "cs-quantiles",
+    "cs-minimum-assets",
+    "cs-minimum-group",
+    "cs-cost",
+    "cs-holdout",
+)
+
+
+@app.callback(
+    Output("cs-result", "children"),
+    Input("cs-run", "n_clicks"),
+    State("cs-source", "value"),
+    *[State(control, "value") for control in CS_CONTROL_IDS],
+    prevent_initial_call=True,
+    running=[(Output("cs-run", "disabled"), True, False)],
+)
+def update_cross_section_result(_clicks, source, *controls):
+    try:
+        request = build_cross_section_request(*controls)
+    except (ValueError, ValidationError):
+        return html.P(
+            "Invalid settings. Check universe rows, dates, group metadata, quantiles and "
+            "minimum asset counts. Point-in-time mode requires membership-from dates."
+        )
+    try:
+        del request
+        return render_cross_section_result(run_cross_section_study(source, *controls), source)
+    except Exception as error:
+        reference = uuid.uuid4().hex
+        logging.getLogger(__name__).error(
+            "cross-sectional stage=execution code=%s reference=%s",
+            type(error).__name__,
+            reference,
         )
         return html.P(
             f"Study failed. Stage: execution · Code: {type(error).__name__} · "

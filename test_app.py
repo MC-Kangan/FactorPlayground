@@ -1,7 +1,17 @@
 import json
 
 import pytest
-from app import app, build_request, render_result, run_study, select_preset, update_result
+from app import (
+    app,
+    build_cross_section_request,
+    build_request,
+    render_cross_section_result,
+    render_result,
+    run_cross_section_study,
+    run_study,
+    select_preset,
+    update_result,
+)
 
 
 def controls(preset="french", frequency="monthly", extra="", advanced=""):
@@ -55,9 +65,6 @@ def test_ten_custom_factors():
 
 
 def test_bad_input_and_safe_error(monkeypatch):
-    from types import SimpleNamespace
-
-    monkeypatch.setattr("app.ctx", SimpleNamespace(triggered_id="run"))
     assert update_result(1, "demo", *controls("custom"))
 
     def fail(*_):
@@ -72,7 +79,58 @@ def test_bad_input_and_safe_error(monkeypatch):
 def test_dash_layout():
     client = app.server.test_client()
     assert client.get("/").status_code == 200
-    assert client.get("/_dash-layout").status_code == 200
+    response = client.get("/_dash-layout")
+    assert response.status_code == 200
+    layout = json.dumps(response.get_json())
+    assert '"workspace-tabs"' in layout
+    assert "Single-stock attribution" in layout
+    assert "Cross-sectional signals" in layout
+    assert '"result"' in layout
+    assert '"cs-result"' in layout
+
+
+def test_analysis_callbacks_run_only_from_explicit_buttons():
+    single = app.callback_map["result.children"]
+    cross_section = app.callback_map["cs-result.children"]
+
+    assert single["inputs"] == [{"id": "run", "property": "n_clicks"}]
+    assert cross_section["inputs"] == [{"id": "cs-run", "property": "n_clicks"}]
+    assert {item["id"] for item in single["state"]} >= {"source", "stock", "selected"}
+    assert {item["id"] for item in cross_section["state"]} >= {
+        "cs-source",
+        "cs-universe",
+        "cs-grouping",
+    }
+
+
+def test_cross_section_demo_and_rendering():
+    universe = (
+        "US:XOM | Energy | US\nUS:CVX | Energy | US\nUS:COP | Energy | US\n"
+        "US:SLB | Energy | US\nUS:EOG | Energy | US\n"
+        "US:LLY | Health Care | US\nUS:JNJ | Health Care | US\n"
+        "US:MRK | Health Care | US\nUS:ABBV | Health Care | US\n"
+        "US:AMGN | Health Care | US"
+    )
+    controls = (
+        universe,
+        "current_watchlist",
+        "sector",
+        "2019-01-01",
+        "2025-01-31",
+        5,
+        10,
+        5,
+        10,
+        "2023-01-01",
+    )
+    request = build_cross_section_request(*controls)
+    assert len(request.portfolio_instruments) == 10
+    report = run_cross_section_study("demo", *controls)
+    presentation = report["results"][0]["presentation"]
+    assert presentation["schema_version"] == "cross-sectional-signal-v2"
+    assert presentation["grouping"] == "sector"
+    assert presentation["segments"]
+    assert render_cross_section_result(report, "demo")
 
 
 def test_request_uses_factor_specs():

@@ -13,6 +13,7 @@ from trade_research.domain.models import (
     ResearchFactorPoint,
 )
 from trade_research.skills.factor_data import month_end, session_dates
+from trade_research.skills.cross_sectional_signal import CrossSectionalSignalParameters
 from trade_research.skills.factor_regression import FactorRegressionParameters
 
 
@@ -118,3 +119,39 @@ def demo_request(request):
             ),
         )
     return request.model_copy(update=update)
+
+
+def cross_section_demo_request(request):
+    """Attach stable daily total returns for a cross-sectional learning run."""
+    params = CrossSectionalSignalParameters.model_validate(
+        request.skill_parameters["cross-sectional-signal"]
+    )
+    start, end = params.start_date, params.end_date
+    assert start is not None and end is not None
+    dates = session_dates("US", start - timedelta(days=400), end)
+    series = []
+    count = len(request.portfolio_instruments)
+    for index, asset in enumerate(request.portfolio_instruments):
+        rank_effect = (index - (count - 1) / 2) * 0.000035
+        noise = 0.0008 * innovations(
+            f"cross-section:{asset.market}:{asset.symbol}", dates[1:], "daily"
+        )
+        market = 0.00015 + 0.0005 * innovations("cross-section:market", dates[1:], "daily")
+        returns = np.clip(market + rank_effect + noise, -0.2, 0.2)
+        series.append(
+            FactorReturnSeries(
+                instrument=asset,
+                frequency="daily",
+                calendar="US",
+                currency="USD",
+                source="fixture",
+                return_basis="gross_total_return",
+                vendor_field="TOTAL_RETURN",
+                retrieved_at=datetime.now(UTC),
+                points=tuple(
+                    FactorReturnPoint(start_date=a, end_date=b, value=float(value))
+                    for a, b, value in zip(dates[:-1], dates[1:], returns, strict=True)
+                ),
+            )
+        )
+    return request.model_copy(update={"factor_series": tuple(series)})

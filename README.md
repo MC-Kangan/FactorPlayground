@@ -1,8 +1,13 @@
 # Factor Playground
 
-A standalone local Dash UI for TradeAgent's factor-regression analyst. It contains
-controls, presentation and synthetic input generation; all real alignment, currency
-conversion and estimation run in the backend.
+A standalone local Dash UI for TradeAgent's research analysts. It contains controls,
+presentation and synthetic input generation; all real alignment, currency conversion
+and estimation run in the backend. The interface is split into two tabbed workspaces:
+single-stock attribution and cross-sectional signal validation.
+
+The same app includes a **Cross-sectional Signal Lab** for TradeAgent's
+`cross-sectional-signal` analyst. It evaluates 12–1 momentum across an editable stock
+universe using monthly formation dates and next-session entry.
 
 ## Start
 
@@ -21,19 +26,23 @@ installs the sibling ../TradeAgent checkout editable.
 
 ## Use
 
-1. Start with Synthetic demo. It creates deterministic USD observations on the
+1. Choose **Single-stock attribution** or **Cross-sectional signals** from the top
+   navigation. Each workspace keeps core settings open and groups less common controls
+   into expandable sections.
+2. Start with Synthetic demo. It creates deterministic USD observations on the
    target calendar, even for a European stock; it does not imitate real FX or market history.
-2. Enter a stock such as US:AAPL or XETRA:SAP.
-3. Choose French, US ETF or Custom. Remove any unwanted preset factors.
-4. Add as many extra benchmarks as the sample can support, one per line:
+3. Enter a stock such as US:AAPL or XETRA:SAP.
+4. Choose French, US ETF or Custom. Remove any unwanted preset factors.
+5. Add as many extra benchmarks as the sample can support, one per line:
    `Pharma | US:IHE`
    or `Growth minus value | US:IWF | US:IWD`.
    French selections subtract cash from funded asset benchmarks once.
-5. Choose daily/monthly, research region, dates, observation minimum, rolling
+6. Choose daily/monthly, research region, dates, observation minimum, rolling
    observations and HAC lags. Then click Run.
-6. Check coverage before coefficients. Internal gaps withhold HAC intervals.
+7. Check coverage before coefficients. Internal gaps withhold HAC intervals.
    R² measures historical explanation, not predictability. The standardized-effect
-   chart helps compare factors with different units.
+   chart helps compare factors with different units. Plotly charts support hover,
+   zoom, pan and image export from their graph toolbar.
 
 Monthly is a useful starting point for cross-market research. Only daily/monthly
 are currently implemented. More factors are not automatically better: correlated
@@ -123,3 +132,35 @@ and daily simulations remain separate synthetic datasets, not a resampling ident
 Rolling summaries show the last valid fit date and mark stale estimates. Skipped window
 dates are listed, and charts leave gaps at failed fits. Original-model condition numbers,
 VIF and collinearity flags remain visible alongside residualized results.
+
+## Cross-sectional Signal Lab
+
+Enter one stock per line:
+
+```text
+US:XOM | Energy | US
+US:CVX | Energy | US
+US:LLY | Health Care | US
+```
+
+Point-in-time mode adds membership dates:
+
+```text
+US:XOM | Energy | US | 2015-01-01 |
+US:OLDCO | Energy | US | 2015-01-01 | 2021-06-30
+```
+
+The controls select current-watchlist or point-in-time membership, whole-universe or
+within-sector/country ranking, quantile count, minimum group size, illustrative cost and
+the chronological holdout start. The output shows:
+
+- monthly Spearman rank IC and its date-block-bootstrap interval;
+- IC consistency, including median, information ratio and positive-month share;
+- average return by score quantile;
+- top-quantile net performance versus the eligible equal-weight universe;
+- turnover, drawdown and development-versus-holdout summaries.
+
+Yahoo runs use adjusted-close returns. Configured runs use TradeAgent's normalized
+return provider, including administrator-mapped Bloomberg total-return data. One study
+must use a common currency and return basis. The synthetic universe is generated only
+for learning and does not represent historical securities.
