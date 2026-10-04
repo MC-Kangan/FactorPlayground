@@ -1,0 +1,51 @@
+id: msci_bloomberg
+label: "MSCI \xB7 Bloomberg index pack"
+enabled: false
+sources:
+- configured
+currency: EUR
+calendar: weekdays
+description: 'Template: replace the securities with entitled MSCI total-return index
+  tickers in EUR. Verify index methodology and publication calendar before enabling.'
+inputs:
+  market:
+    security: REPLACE_MARKET Index
+    field: PX_LAST
+    currency: EUR
+    unit: index_points
+  value:
+    security: REPLACE_VALUE Index
+    field: PX_LAST
+    currency: EUR
+    unit: index_points
+  growth:
+    security: REPLACE_GROWTH Index
+    field: PX_LAST
+    currency: EUR
+    unit: index_points
+  momentum:
+    security: REPLACE_MOMENTUM Index
+    field: PX_LAST
+    currency: EUR
+    unit: index_points
+level_factors:
+- id: market
+  label: MSCI market
+  legs:
+    market: 1
+  transform: simple_return
+- id: value
+  label: MSCI value
+  legs:
+    value: 1
+  transform: simple_return
+- id: growth
+  label: MSCI growth
+  legs:
+    growth: 1
+  transform: simple_return
+- id: momentum
+  label: MSCI momentum
+  legs:
+    momentum: 1
+  transform: simple_return

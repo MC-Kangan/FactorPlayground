@@ -6,6 +6,7 @@ from app import (
     app,
     build_cross_section_request,
     build_request,
+    data_source_guidance,
     graph,
     render_cross_section_result,
     render_result,
@@ -31,11 +32,14 @@ def controls(preset="french", frequency="monthly", extra="", advanced=""):
         60 if frequency == "monthly" else 252,
         3,
         "",
-        "",
+        "original",
+        [],
+        [],
+        [],
     )
 
 
-@pytest.mark.parametrize("preset", ["french", "us_etf"])
+@pytest.mark.parametrize("preset", ["french", "us_etf", "msci_europe"])
 @pytest.mark.parametrize("frequency", ["daily", "monthly"])
 def test_demo_end_to_end(preset, frequency):
     report = run_study("demo", *controls(preset, frequency))
@@ -112,6 +116,35 @@ def test_graph_has_a_bounded_dash_container_height():
     assert props["style"] == {"height": "390px"}
 
 
+def test_yaml_pack_end_to_end_and_subset():
+    args = list(controls("pack:energy_yahoo"))
+    args[2] = ["brent", "gas"]
+    report = run_study("demo", *args)
+    coefficients = report["results"][0]["presentation"]["coefficients"]
+    assert len(coefficients) == 3
+    assert "Fama–French" in data_source_guidance("yahoo")
+
+
+def test_all_dropdowns_are_non_searchable():
+    def visit(component):
+        if hasattr(component, "to_plotly_json"):
+            data = component.to_plotly_json()
+            if data["type"] == "Dropdown":
+                assert data["props"]["searchable"] is False
+            children = data["props"].get("children", [])
+            for child in children if isinstance(children, list) else [children]:
+                visit(child)
+
+    visit(app.layout)
+
+
+def test_msci_europe_preset_is_available_in_factor_selector():
+    options, values = select_preset("msci_europe")
+
+    assert len(options) == 3
+    assert values == ["market", "growth_minus_value", "momentum_minus_market"]
+
+
 def test_cross_section_demo_and_rendering():
     universe = (
         "US:XOM | Energy | US\nUS:CVX | Energy | US\nUS:COP | Energy | US\n"
@@ -149,8 +182,8 @@ def test_request_uses_factor_specs():
 
 def test_comparisons_and_residualization_in_playground():
     args = list(controls(extra="Sector | US:IHE"))
-    args[-2] = "Market | market_excess\nMarket and sector | market_excess,extra_0"
-    args[-1] = "extra_0 | market_excess,hml"
+    args[12] = "Market | market_excess\nMarket and sector | market_excess,extra_0"
+    args[13:] = ["controls", ["extra_0"], ["market_excess", "hml"], []]
     report = run_study("demo", *args)
     p = report["results"][0]["presentation"]
     assert len(p["comparisons"]) == 3
@@ -192,3 +225,43 @@ def test_demo_date_extension_preserves_overlapping_history():
     b = next(s for s in extended.factor_series if s.instrument == extended.instrument)
     by_end = {p.end_date: p for p in b.points}
     assert all(p == by_end[p.end_date] for p in a.points)
+
+
+def test_sequential_controls_and_relationship_rendering():
+    args = list(controls("us_etf"))
+    args[13:] = ["sequential", [], [], list(reversed(args[2]))]
+    report = run_study("demo", *args)
+    p = report["results"][0]["presentation"]
+    assert p["attribution_mode"] == "sequential"
+    assert p["sequential_order"] == args[-1]
+    assert p["r_squared"] == pytest.approx(p["comparisons"][0]["r_squared"])
+    rendered = str(render_result(report, "demo"))
+    assert "Incremental R²" in rendered
+    assert "Rolling stock–factor correlations" in rendered
+
+
+def test_attribution_choices_preserve_order_and_remove_stale_factors():
+    from app import attribution_choices
+
+    values = attribution_choices(
+        "us_etf",
+        ["market", "growth_minus_value"],
+        "",
+        "",
+        ["missing"],
+        ["market"],
+        ["growth_minus_value", "missing"],
+    )
+    assert values[3] == []
+    assert values[4] == ["market"]
+    assert values[5] == ["growth_minus_value", "market"]
+
+
+def test_incomplete_sequential_order_and_empty_controls_are_rejected():
+    args = list(controls("us_etf"))
+    args[13:] = ["sequential", [], [], ["market"]]
+    with pytest.raises(ValueError):
+        build_request(*args)
+    args[13:] = ["controls", [], [], []]
+    with pytest.raises(ValueError):
+        build_request(*args)

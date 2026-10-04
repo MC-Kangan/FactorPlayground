@@ -9,20 +9,69 @@ The same app includes a **Cross-sectional Signal Lab** for TradeAgent's
 `cross-sectional-signal` analyst. It evaluates 12–1 momentum across an editable stock
 universe using monthly formation dates and next-session entry.
 
-## Start
+## Install on a company Windows laptop
 
-Double-click **Start Factor Playground.command**, or:
+Keep the two source repositories side by side. Do not copy an existing virtual environment:
+
+```text
+C:\Research\TradeAgent\
+C:\Research\FactorPlayground\
+```
+
+Use firm-approved **64-bit Python 3.12** and your managed JFrog pip configuration.
+From PowerShell, without activating a virtual environment:
+
+```powershell
+cd C:\Research\FactorPlayground
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --only-binary=:all: -r ..\TradeAgent\requirements.lock -r requirements-ui.lock
+.\.venv\Scripts\python.exe -m pip install --no-deps --no-build-isolation -e ..\TradeAgent
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe app.py --open-browser
+```
+
+These commands install the backend into the app environment; a second backend environment,
+HTTP server, Docker, Node.js and an LLM subscription are unnecessary. `requirements.txt`
+is a convenience installation combining the same backend and UI pins. The UI lock contains
+only additional packages, so backend versions have one authoritative definition.
+
+Read the [Windows/JFrog and offline installation guide](../TradeAgent/docs/corporate-installation.md)
+before transferring the project. The [dependency audit](../TradeAgent/docs/dependency-audit.md)
+identifies packages to check with IT, including Bloomberg `blpapi`, platform-specific wheels
+and the `backtesting` license. Windows and live corporate Bloomberg access still require
+validation on your firm machine; local validation was on macOS.
+
+## Start on macOS / Linux
 
 ```sh
 cd ~/Documents/FactorPlayground
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --only-binary=:all: -r ../TradeAgent/requirements.lock -r requirements-ui.lock
+.venv/bin/python -m pip install --no-deps --no-build-isolation -e ../TradeAgent
 .venv/bin/python app.py --open-browser
 ```
 
-Open http://127.0.0.1:8050. The server binds only to localhost. Do not expose it
-publicly. It stores neither raw observations nor reports.
+For subsequent runs use the last command, or the macOS **Start Factor Playground.command**
+launcher. Open http://127.0.0.1:8050. Use `--port 8051` if that port is occupied.
+The app binds only to localhost and stores neither raw observations nor reports.
+Stop it with Ctrl+C. Restart after changing Python, CSS, YAML packs or provider settings.
 
-For a fresh environment, install requirements.txt. It pins the UI environment and
-installs the sibling ../TradeAgent checkout editable.
+## Configure the backend and packs
+
+Select **Configured backend** to use `TRADE_RESEARCH_CONFIG`. Set environment variables
+in the same PowerShell session that starts the app:
+
+```powershell
+$env:TRADE_RESEARCH_CONFIG = "C:\Research\private-config\research.json"
+$env:FACTOR_PLAYGROUND_PACK_DIR = "C:\Research\private-config\factor_packs"
+.\.venv\Scripts\python.exe app.py --open-browser
+```
+
+The pack-directory variable is optional; omit it to use the bundled `factor_packs` directory.
+The app reads process environment directly and does **not** automatically load `.env`.
+The CLI's `.env` behavior is separate. Keep credentials outside packs and source control.
+For Bloomberg mappings, units, currencies and BPIPE limitations, follow the
+[corporate configuration example](../TradeAgent/docs/corporate-installation.md#bloomberg-configuration).
 
 ## Use
 
@@ -79,6 +128,21 @@ the demo supports the French research catalog only.
   Bloomberg FX. Use a firm FX adapter or normalized USD inputs.
 - **Synthetic demo:** offline controls and numerical integration check only.
 
+Synthetic data is the safe default so the app opens without network access or market-data
+credentials. It is never mixed into a Yahoo or configured-provider result. For a public
+Repsol example, choose **Yahoo + French**, enter `BME:REP`, select the French preset and
+Europe, then choose daily or monthly frequency. The adapter resolves that canonical ID to
+Yahoo's `REP.MC`; the French adapter downloads the corresponding native-frequency files
+from the official Kenneth French library when the study runs.
+
+The **MSCI Europe** preset is for the configured provider. Its canonical index identities
+must be mapped to the firm's exact entitled Bloomberg identifiers, total-return fields,
+currency and return basis in `TRADE_RESEARCH_CONFIG`; the app does not scrape or guess
+licensed MSCI series. The energy YAML pack for Yahoo uses USO, BNO, UNG and UGA as
+tradable ETP return proxies, whose returns include product structure, collateral, fees and
+futures roll effects. It does not claim to represent spot crude, spot gas or diesel. The Bloomberg YAML templates provide editable price-series mappings and transforms;
+replace placeholders with verified entitled securities before enabling them.
+
 See ../TradeAgent/docs/factor-mvp2-implementation.md for provider contracts, cash
 semantics, native monthly inputs, coverage and assumptions. Custom providers can be
 registered in ResearchEngine without changing the estimator; this UI does not attempt
@@ -90,36 +154,43 @@ results until Run is clicked again.
 
 ## Development checks
 
-The backend development environment supplies pytest; the app environment supplies Dash:
+Install development tools into the same environment as Dash, through the approved index:
 
-```sh
-PYTHONPATH="$PWD:$PWD/.venv/lib/python3.13/site-packages" ../TradeAgent/.venv/bin/python -m pytest test_app.py
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r ..\TradeAgent\requirements-dev.lock
+.\.venv\Scripts\python.exe -m pytest test_app.py
 ```
 
-Adjust the Python minor-version directory to match the installed environments.
-Tests are offline: daily/monthly, both presets, subset plus multiple extra factors,
-ten-factor custom model, safe errors and Dash routes.
-
+On macOS/Linux replace `.\.venv\Scripts\python.exe` with `.venv/bin/python`.
+Tests use synthetic data and mocked providers; they do not prove Bloomberg entitlements.
+Backend quality checks are documented in the TradeAgent README.
 
 ## Model comparison and stability
 
-The factor engine stays sector-independent. The new controls accept:
-- Named models, one per line: `Market and sector | market_excess,extra_0`.
-- Optional residualization, one per line: `extra_0 | market_excess,hml`.
+The factor engine stays sector-independent. Under **Model diagnostics**, select:
 
-Preset factor IDs appear in brackets in the selector. Additional factors use their
-zero-based line positions (extra_0, extra_1). Comparison subsets must be part of the
-selected full model. Controls must remain selected and cannot themselves be targets.
+- **Original factors**: reference joint regression.
+- **Remove selected exposures**: choose factor targets and retained control factors
+  using dropdowns. The targets and controls must not overlap.
+- **Sequential attribution**: select every factor in priority order. Clear and
+  reselect to reorder; the displayed numbered sequence is the applied order.
 
-The comparison table always uses original factors. Residualization changes the main
-coefficient table and rolling plot; it preserves the full fitted returns and shows
-the remaining variance of each transformed factor. This is attribution, not causality.
+Earlier sequential factors receive shared variation. These full-basis transformations
+preserve fitted returns/R², but change the interpretation of exposures. Rolling
+transformations are fitted inside each window. Exact redundant definitions still fail;
+orthogonalization cannot identify independent oil, diesel and crack-change exposures
+when one is exactly the difference of the others.
 
-Rolling minimum/median/maximum and sign shares are descriptive summaries of overlapping
-windows, not confidence intervals. Change the rolling-window control to assess horizon
-sensitivity. See ../TradeAgent/docs/factor-model-comparison.md for assumptions and the
-synthetic European energy example. No PCA, ridge or prediction claims are introduced.
+Open **Relationships and overlap** in the results for stock–factor Pearson/Spearman
+correlations, partial correlations controlling for all other factors, same-sample
+incremental R², before/after factor heatmaps, VIF and rolling correlations. Rolling
+correlations use the existing rolling-window setting; Spearman traces can be enabled
+in the legend. Partial correlation is blank if the reduced stock regression leaves no
+meaningful residual variation. These are descriptive measures, not selection rules,
+causal effects or predictive tests. Original-model coefficients remain in Model comparison.
 
+Named model subsets still use `Model name | factor_id,other_id`. Factor IDs appear
+in selection labels; manually entered extra factors use `extra_0`, `extra_1`, etc.
 
 ## Review fixes
 
@@ -164,3 +235,39 @@ Yahoo runs use adjusted-close returns. Configured runs use TradeAgent's normaliz
 return provider, including administrator-mapped Bloomberg total-return data. One study
 must use a common currency and return basis. The synthetic universe is generated only
 for learning and does not represent historical securities.
+
+
+## YAML factor packs
+
+Place reusable definitions in `factor_packs/*.yaml` and restart the app. They appear
+in **Starting factor set**; select a pack and its factors load automatically. All
+selectors now show their choices without a search input. Set
+`FACTOR_PLAYGROUND_PACK_DIR` to use another local directory, such as a firm repo.
+
+The public **Energy · Yahoo ETF proxies** pack runs with Yahoo or the offline demo.
+The Bloomberg MSCI and energy templates are disabled until you replace the placeholder
+tickers, verify units/scales/calendar and set `enabled: true`. The energy template
+shows how to form diesel minus Brent from compatible price levels before applying a
+first difference. Simple returns and log returns are also supported at daily/monthly
+frequency. Stock returns retain their existing simple total-return convention.
+
+For the schema, Repsol currency considerations and backend configuration, see
+[the YAML pack guide](../TradeAgent/docs/factor-yaml-packs.md). Pack definitions are
+local configuration; no raw licensed observations or credentials belong in them.
+
+## Troubleshooting
+
+- **Install cannot find a version:** give IT both lockfiles and the failing package/version.
+  A package on public PyPI may be absent or blocked in JFrog. Do not silently relax pins.
+- **Missing DLL or no matching wheel:** check Python version, Windows architecture and the
+  approved Bloomberg runtime. Do not copy macOS wheels or a macOS virtual environment.
+- **No packs:** check the configured directory, file validation and `enabled` flags; restart.
+- **No data:** distinguish network access, Bloomberg entitlement, identifier mapping and
+  insufficient overlapping history. Synthetic demo checks the UI independently.
+- **Currency error:** provide a normalized same-currency panel or an authorized FX adapter.
+  Changing a label in YAML does not convert a series.
+- **Redundant factors:** remove an exact dependency (for example oil, diesel and their
+  difference together). Orthogonalization cannot restore missing rank.
+- **Old layout or growing plots:** stop older app processes, restart from the current
+  checkout and refresh the browser. Charts have bounded heights in the current CSS.
+- **Stale results:** changing inputs intentionally clears results; click Run again.

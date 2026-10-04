@@ -41,6 +41,7 @@ header p, .workspace-header p { margin: 0; color: var(--muted); }
 .control-heading { padding: 22px 22px 17px; }
 .control-heading h3 { margin: 4px 0; font-size: 18px; }
 .help-text, .section-description, .run-note { margin: 5px 0 13px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.source-guidance { margin: -4px 0 16px; padding: 10px 11px; border-left: 3px solid var(--brand); border-radius: 0 6px 6px 0; background: var(--brand-soft); color: #365d51; font-size: 10px; line-height: 1.55; }
 .settings-section { border-top: 1px solid var(--line); background: var(--surface); }
 .settings-section > summary { display: flex; align-items: center; justify-content: space-between; padding: 15px 22px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 750; }
 .settings-section > summary::-webkit-details-marker { display: none; }

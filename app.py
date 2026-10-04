@@ -11,6 +11,7 @@ import threading
 import uuid
 import webbrowser
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html
@@ -19,8 +20,9 @@ from pydantic import ValidationError
 
 from trade_research.domain import AnalysisRequest, InstrumentId
 from trade_research.domain.factors import preset_factors
-from trade_research.domain.models import MAX_FACTOR_COUNT
+from trade_research.domain.models import MAX_FACTOR_COUNT, FactorSpec
 from trade_research.engine import ResearchEngine
+from trade_research.factor_packs import load_factor_packs
 from trade_research.settings import Settings
 from trade_research.skills.cross_sectional_signal import (
     CrossSectionalSignalParameters,
@@ -118,6 +120,44 @@ WARNINGS = {
 
 TODAY = datetime.now(UTC).date()
 GRAPH_HEIGHT_PX = 390
+SOURCE_GUIDANCE = {
+    "demo": (
+        "Offline deterministic data for learning and UI checks. It does not represent market "
+        "history and makes no web requests."
+    ),
+    "yahoo": (
+        "Downloads equity and ETF adjusted closes from Yahoo when you run the study. The "
+        "Fama–French preset separately downloads official research files. Yahoo futures and "
+        "indexes are rejected because their return conventions are not verified."
+    ),
+    "configured": (
+        "Uses the provider configured for TradeAgent, including entitled Bloomberg return "
+        "series. MSCI and commodity indexes require explicit identifier, field, currency and "
+        "return-basis mappings; there is no silent public-data fallback."
+    ),
+}
+PACK_DIRECTORY = Path(
+    os.environ.get("FACTOR_PLAYGROUND_PACK_DIR", str(Path(__file__).parent / "factor_packs"))
+)
+FACTOR_PACKS = load_factor_packs(PACK_DIRECTORY)
+
+
+def available_factors(preset):
+    if preset.startswith("pack:"):
+        return pack_for(preset).selected_factors()
+    return preset_factors(preset)
+
+
+def pack_for(preset):
+    if not preset.startswith("pack:"):
+        return None
+    if preset[5:] not in FACTOR_PACKS:
+        raise ValueError("Unknown YAML factor pack")
+    return FACTOR_PACKS[preset[5:]]
+
+
+def data_source_guidance(source):
+    return SOURCE_GUIDANCE.get(source, "Choose a supported data source.")
 
 
 def instrument(text):
@@ -140,6 +180,43 @@ def parse_lines(text):
     return rows
 
 
+def editor_factors(preset, selected, extra, advanced):
+    factors = [
+        f.model_dump(mode="json") for f in available_factors(preset) if f.id in (selected or [])
+    ]
+    # Each line adds a funded benchmark; two legs make a self-financing spread.
+    for i, line in enumerate((extra or "").splitlines()):
+        if not line.strip():
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) not in (2, 3):
+            raise ValueError(
+                "Extra factors use Label | MARKET:SYMBOL | optional short MARKET:SYMBOL."
+            )
+        long_instrument = instrument(parts[1])
+        short_instrument = instrument(parts[2]) if len(parts) == 3 else None
+        factors.append(
+            dict(
+                id=f"extra_{i}",
+                label=parts[0],
+                kind="spread" if len(parts) == 3 else "asset_return",
+                instrument=long_instrument.model_dump(),
+                short_instrument=(
+                    short_instrument.model_dump() if short_instrument is not None else None
+                ),
+                calendar="weekdays" if long_instrument.market == "INDEX" else None,
+                short_calendar=(
+                    "weekdays"
+                    if short_instrument is not None and short_instrument.market == "INDEX"
+                    else None
+                ),
+            )
+        )
+    if (advanced or "").strip():
+        factors = json.loads(advanced)
+    return factors
+
+
 def build_request(
     stock,
     preset,
@@ -154,34 +231,21 @@ def build_request(
     rolling,
     lags,
     comparisons,
-    residualizations,
+    attribution_mode,
+    residual_targets,
+    residual_controls,
+    sequential_order,
 ):
-    factors = [
-        f.model_dump(mode="json") for f in preset_factors(preset) if f.id in (selected or [])
-    ]
-    # Each line adds a funded benchmark; two legs make a self-financing spread.
-    for i, line in enumerate((extra or "").splitlines()):
-        if not line.strip():
-            continue
-        parts = [part.strip() for part in line.split("|")]
-        if len(parts) not in (2, 3):
-            raise ValueError(
-                "Extra factors use Label | MARKET:SYMBOL | optional short MARKET:SYMBOL."
-            )
-        factors.append(
-            dict(
-                id=f"extra_{i}",
-                label=parts[0],
-                kind="spread" if len(parts) == 3 else "asset_return",
-                instrument=instrument(parts[1]).model_dump(),
-                short_instrument=instrument(parts[2]).model_dump() if len(parts) == 3 else None,
-            )
-        )
-    if (advanced or "").strip():
-        factors = json.loads(advanced)
+    factors = editor_factors(preset, selected, extra, advanced)
+    if attribution_mode not in {"original", "controls", "sequential"}:
+        raise ValueError("Choose a supported attribution mode")
+    if attribution_mode == "controls" and (not residual_targets or not residual_controls):
+        raise ValueError("Choose targets and controls for residualization")
+    if attribution_mode == "sequential" and not sequential_order:
+        raise ValueError("Choose an explicit factor order")
     params = FactorRegressionParameters.model_validate(
         dict(
-            preset=preset,
+            preset="custom" if pack_for(preset) else preset,
             factors=factors,
             frequency=frequency,
             region=region,
@@ -195,9 +259,12 @@ def build_request(
                 {"name": name, "factor_ids": ids} for name, ids in parse_lines(comparisons)
             ],
             residualizations=[
-                {"factor_id": target, "against": ids}
-                for target, ids in parse_lines(residualizations)
-            ],
+                {"factor_id": target, "against": residual_controls}
+                for target in (residual_targets or [])
+            ]
+            if attribution_mode == "controls"
+            else [],
+            sequential_order=(sequential_order or []) if attribution_mode == "sequential" else [],
         )
     ).resolve_dates(TODAY)
     return AnalysisRequest(
@@ -209,6 +276,17 @@ def build_request(
 
 def run_study(source, *controls):
     request = build_request(*controls)
+    pack = pack_for(controls[1])
+    if pack:
+        if not pack.enabled or source not in pack.sources:
+            raise ValueError("Choose a supported source and a configured, enabled factor pack.")
+        if (controls[4] or "").strip():
+            raise ValueError("Use Custom factors for JSON overrides, not a YAML pack.")
+        selected = {f["id"] for f in request.skill_parameters["factor-regression"]["factors"]}
+        # Fetch only selected pack columns; unselected series must not remove observations.
+        pack = pack.subset(selected)
+        if pack.level_factors and source != "configured":
+            raise ValueError("Bloomberg level packs require the configured source.")
     if source == "demo":
         request = demo_request(request)
         settings = Settings()
@@ -218,6 +296,11 @@ def run_study(source, *controls):
         settings = Settings.from_environment(os.environ)
     else:
         raise ValueError("Choose a data source.")
+    if source == "configured":
+        settings = Settings.model_validate(
+            settings.model_dump()
+            | {"bloomberg_factor_pack": pack if pack and pack.level_factors else None}
+        )
     return asyncio.run(ResearchEngine.from_settings(settings).analyze(request)).model_dump(
         mode="json"
     )
@@ -261,28 +344,30 @@ def build_cross_section_request(
     holdout_start,
 ):
     members = parse_universe(universe)
-    parameters = CrossSectionalSignalParameters.model_validate(
-        {
-            "start_date": start,
-            "end_date": end,
-            "quantiles": quantiles,
-            "minimum_assets": minimum_assets,
-            "universe_mode": universe_mode,
-            "members": [member.model_dump(mode="json") for member in members],
-            "grouping": grouping,
-            "minimum_group_assets": minimum_group_assets,
-            "transaction_cost_bps": cost_bps,
-            "holdout_start_date": holdout_start or None,
-        }
-    ).resolve_dates(TODAY).validate_instruments(tuple(m.instrument for m in members))
+    parameters = (
+        CrossSectionalSignalParameters.model_validate(
+            {
+                "start_date": start,
+                "end_date": end,
+                "quantiles": quantiles,
+                "minimum_assets": minimum_assets,
+                "universe_mode": universe_mode,
+                "members": [member.model_dump(mode="json") for member in members],
+                "grouping": grouping,
+                "minimum_group_assets": minimum_group_assets,
+                "transaction_cost_bps": cost_bps,
+                "holdout_start_date": holdout_start or None,
+            }
+        )
+        .resolve_dates(TODAY)
+        .validate_instruments(tuple(m.instrument for m in members))
+    )
     return AnalysisRequest(
         instrument=InstrumentId(symbol="BASKET", market="PORTFOLIO"),
         scope="portfolio",
         portfolio_instruments=tuple(member.instrument for member in members),
         analysts=("cross-sectional-signal",),
-        skill_parameters={
-            "cross-sectional-signal": parameters.model_dump(mode="json")
-        },
+        skill_parameters={"cross-sectional-signal": parameters.model_dump(mode="json")},
     )
 
 
@@ -463,6 +548,105 @@ def table(headings, rows):
     )
 
 
+def render_relationships(p):
+    rows = p.get("relationships", [])
+    if not rows:
+        return []
+    labels = [r["label"] for r in rows]
+    children = [
+        html.H3("Factor relationships · original inputs"),
+        html.P(
+            "All diagnostics use the regression's aligned sample and configured returns or changes, "
+            "not price levels. Partial correlation removes all other selected factors from both "
+            "the stock and the factor. Incremental R² removes one factor from the full model; "
+            "contributions do not add up when factors share information. These are historical "
+            "associations, not significance rankings or forecasts."
+        ),
+        table(
+            ["Factor", "Pearson", "Spearman", "Partial correlation", "Incremental R² · pp"],
+            [
+                [
+                    r["label"],
+                    _number(r["pearson"]),
+                    _number(r["spearman"]),
+                    _number(r["partial_correlation"]),
+                    f"{100 * r['incremental_r_squared']:.2f}",
+                ]
+                for r in rows
+            ],
+        ),
+    ]
+    fig = go.Figure()
+    for key in ("pearson", "spearman"):
+        fig.add_bar(x=labels, y=[r[key] for r in rows], name=key.title())
+    finish_figure(fig, "Stock–factor correlations · original inputs", yaxis_title="Correlation")
+    fig.update_layout(yaxis_range=[-1, 1], barmode="group")
+    children.append(graph(fig))
+    for title, matrix in [
+        ("Original factor correlations · Pearson", p["original_factor_correlations"]),
+        ("Selected attribution basis · Pearson", p["factor_correlations"]),
+    ]:
+        if title.startswith("Selected") and p["attribution_mode"] == "original":
+            continue
+        heat = go.Figure(
+            go.Heatmap(
+                z=matrix, x=labels, y=labels, zmin=-1, zmax=1, colorscale="RdBu", reversescale=True
+            )
+        )
+        finish_figure(heat, title)
+        heat.update_layout(hovermode="closest")
+        children.append(graph(heat))
+    full = p["comparisons"][0]
+    children.append(
+        table(
+            ["Factor", "Original VIF", "Selected-basis VIF"],
+            [
+                [label, _number(before), _number(after)]
+                for label, before, after in zip(
+                    labels,
+                    full["variance_inflation_factors"],
+                    p["variance_inflation_factors"],
+                    strict=True,
+                )
+            ],
+        )
+    )
+    children.append(
+        html.P(
+            f"Original condition number: {full['condition_number']:.2f}; "
+            f"selected basis: {p['condition_number']:.2f}. "
+            "Lower collinearity in a transformed basis does not create new information."
+        )
+    )
+    rolling = p.get("rolling_correlations", [])
+    if rolling:
+        fig = go.Figure()
+        for method in ("pearson", "spearman"):
+            for i, label in enumerate(labels):
+                fig.add_scatter(
+                    x=[r["end_date"] for r in rolling],
+                    y=[r[method][i] for r in rolling],
+                    name=f"{label} · {method}",
+                    mode="lines",
+                    visible=True if method == "pearson" else "legendonly",
+                )
+        finish_figure(
+            fig, "Rolling stock–factor correlations · original inputs", yaxis_title="Correlation"
+        )
+        fig.update_layout(yaxis_range=[-1, 1])
+        children.extend(
+            [
+                graph(fig),
+                html.P(
+                    f"Window: {p['rolling_window']} aligned observations, sampled at each month's last "
+                    "retained observation. Spearman lines can be enabled in the legend. "
+                    "Overlapping windows are descriptive; missing dates can extend calendar spans."
+                ),
+            ]
+        )
+    return children
+
+
 def render_result(report, source):
     result = report["results"][0]
     p = result.get("presentation")
@@ -525,6 +709,21 @@ def render_result(report, source):
             html.P("No fit is shown. Review coverage, factor definitions and minimum observations.")
         )
         return html.Div(details)
+    details.append(
+        html.P(
+            "Attribution: "
+            + p["attribution_mode"]
+            + (" · " + " → ".join(p["sequential_order"]) if p["sequential_order"] else "")
+        )
+    )
+    details.append(
+        html.Details(
+            [
+                html.Summary("Relationships and overlap · correlations, VIF and incremental R²"),
+                *render_relationships(p),
+            ]
+        )
+    )
     details.append(
         html.P(
             f"R²: {p['r_squared']:.1%} · Adjusted R²: {p['adjusted_r_squared']:.1%} · "
@@ -753,9 +952,7 @@ def empty_state(title, description, steps):
             html.P(description),
             html.Div(
                 [
-                    html.Div(
-                        [html.Strong(f"0{index}"), html.H3(step_title), html.P(step_body)]
-                    )
+                    html.Div([html.Strong(f"0{index}"), html.H3(step_title), html.P(step_body)])
                     for index, (step_title, step_body) in enumerate(steps, start=1)
                 ],
                 className="steps",
@@ -788,7 +985,9 @@ def single_stock_workspace():
                 [
                     html.Div("STUDY SETTINGS", className="eyebrow"),
                     html.H3("Configure the regression"),
-                    help_text("Start with the core inputs. Open advanced sections only when needed."),
+                    help_text(
+                        "Start with the core inputs. Open advanced sections only when needed."
+                    ),
                 ],
                 className="control-heading",
             ),
@@ -799,15 +998,24 @@ def single_stock_workspace():
                     field(
                         "Data source",
                         dcc.Dropdown(
+                            searchable=False,
                             id="source",
                             options=[
                                 {"label": "Synthetic demo · offline", "value": "demo"},
                                 {"label": "Yahoo + French factors", "value": "yahoo"},
-                                {"label": "Configured providers · Bloomberg ready", "value": "configured"},
+                                {
+                                    "label": "Configured providers · Bloomberg ready",
+                                    "value": "configured",
+                                },
                             ],
                             value="demo",
                             clearable=False,
                         ),
+                    ),
+                    html.P(
+                        data_source_guidance("demo"),
+                        id="source-guidance",
+                        className="source-guidance",
                     ),
                     field(
                         "Stock identifier",
@@ -817,26 +1025,46 @@ def single_stock_workspace():
                             placeholder="MARKET:SYMBOL",
                         ),
                     ),
+                    help_text("Examples: BME:REP for Repsol, US:AAPL, XETRA:SAP."),
                     field(
                         "Starting factor set",
                         dcc.Dropdown(
+                            searchable=False,
                             id="preset",
                             options=[
                                 {"label": "Fama–French 5 + momentum", "value": "french"},
                                 {"label": "US ETF proxies", "value": "us_etf"},
+                                {
+                                    "label": "MSCI Europe · configured provider",
+                                    "value": "msci_europe",
+                                },
                                 {"label": "Custom factors", "value": "custom"},
+                                *[
+                                    {
+                                        "label": pack.label
+                                        + (" · configure YAML first" if not pack.enabled else ""),
+                                        "value": "pack:" + pack.id,
+                                        "disabled": not pack.enabled,
+                                    }
+                                    for pack in FACTOR_PACKS.values()
+                                ],
                             ],
                             value="french",
                             clearable=False,
                         ),
                     ),
-                    field("Factors in this run", dcc.Dropdown(id="selected", multi=True)),
+                    html.Div(id="pack-summary", className="help-text"),
+                    field(
+                        "Factors in this run",
+                        dcc.Dropdown(searchable=False, id="selected", multi=True),
+                    ),
                     help_text(
                         "Remove factors to test a smaller model. IDs remain visible for model comparisons."
                     ),
                     field(
                         "Frequency",
                         dcc.Dropdown(
+                            searchable=False,
                             id="frequency",
                             options=[
                                 {"label": "Monthly · recommended start", "value": "monthly"},
@@ -849,7 +1077,11 @@ def single_stock_workspace():
                     field(
                         "Research factor region",
                         dcc.Dropdown(
-                            id="region", options=["US", "Europe"], value="US", clearable=False
+                            searchable=False,
+                            id="region",
+                            options=["US", "Europe"],
+                            value="US",
+                            clearable=False,
                         ),
                     ),
                 ],
@@ -906,7 +1138,8 @@ def single_stock_workspace():
                         ),
                     ),
                     help_text(
-                        "Format: Label | long benchmark | optional short benchmark. Use total-return instruments."
+                        "Optional additions: Label | long benchmark | optional short benchmark. "
+                        "For reusable definitions, choose a YAML factor pack above."
                     ),
                     field(
                         "Advanced factor definitions · JSON",
@@ -937,16 +1170,69 @@ def single_stock_workspace():
                     ),
                     help_text("Format: model name | comma-separated factor IDs."),
                     field(
-                        "Residualize selected factors",
-                        dcc.Textarea(
-                            id="residualizations",
-                            value="",
-                            placeholder="extra_0 | market_excess,hml",
-                            className="code-input short",
+                        "Attribution method",
+                        dcc.Dropdown(
+                            id="attribution-mode",
+                            searchable=False,
+                            clearable=False,
+                            value="original",
+                            options=[
+                                {
+                                    "label": "Original factors · reference model",
+                                    "value": "original",
+                                },
+                                {"label": "Remove selected exposures", "value": "controls"},
+                                {
+                                    "label": "Sequential attribution · ordered",
+                                    "value": "sequential",
+                                },
+                            ],
                         ),
                     ),
+                    html.Div(
+                        [
+                            field(
+                                "Factors to residualize",
+                                dcc.Dropdown(
+                                    id="residual-targets", searchable=False, multi=True, value=[]
+                                ),
+                            ),
+                            field(
+                                "Remove exposure to these controls",
+                                dcc.Dropdown(
+                                    id="residual-controls", searchable=False, multi=True, value=[]
+                                ),
+                            ),
+                            help_text(
+                                "Controls stay in the model. Targets cannot also be controls. "
+                                "Custom factors can remain correlated with one another."
+                            ),
+                        ],
+                        id="control-attribution-settings",
+                        style={"display": "none"},
+                    ),
+                    html.Div(
+                        [
+                            field(
+                                "Factor priority · select in order",
+                                dcc.Dropdown(
+                                    id="sequential-order", searchable=False, multi=True, value=[]
+                                ),
+                            ),
+                            html.Div(id="sequential-order-preview", className="help-text"),
+                            help_text(
+                                "To reorder, clear the selection and select every factor in your "
+                                "preferred order. Earlier factors receive shared variation. "
+                                "The stock is fitted jointly to the resulting factor basis."
+                            ),
+                        ],
+                        id="sequential-attribution-settings",
+                        style={"display": "none"},
+                    ),
                     help_text(
-                        "Format: target factor ID | control IDs. This changes attribution, not fitted returns."
+                        "All methods retain the original model comparison. Attribution "
+                        "changes interpretation, not the fitted returns or R². "
+                        "Rolling transformations are refitted inside each window."
                     ),
                 ],
             ),
@@ -1005,6 +1291,7 @@ def cross_section_workspace():
                     field(
                         "Data source",
                         dcc.Dropdown(
+                            searchable=False,
                             id="cs-source",
                             options=[
                                 {"label": "Synthetic demo · offline", "value": "demo"},
@@ -1014,6 +1301,11 @@ def cross_section_workspace():
                             value="demo",
                             clearable=False,
                         ),
+                    ),
+                    html.P(
+                        data_source_guidance("demo"),
+                        id="cs-source-guidance",
+                        className="source-guidance",
                     ),
                     field(
                         "Universe editor",
@@ -1035,9 +1327,13 @@ def cross_section_workspace():
                     field(
                         "Universe history",
                         dcc.Dropdown(
+                            searchable=False,
                             id="cs-universe-mode",
                             options=[
-                                {"label": "Current watchlist · exploratory", "value": "current_watchlist"},
+                                {
+                                    "label": "Current watchlist · exploratory",
+                                    "value": "current_watchlist",
+                                },
                                 {"label": "Point-in-time membership", "value": "point_in_time"},
                             ],
                             value="current_watchlist",
@@ -1047,6 +1343,7 @@ def cross_section_workspace():
                     field(
                         "Ranking basis",
                         dcc.Dropdown(
+                            searchable=False,
                             id="cs-grouping",
                             options=[
                                 {"label": "Whole universe", "value": "overall"},
@@ -1137,7 +1434,10 @@ def cross_section_workspace():
                     "Test whether a signal ranks future returns",
                     "Evaluate 12–1 momentum with rank IC, quantile returns, turnover, costs and a chronological holdout.",
                     [
-                        ("Define", "Enter an investable universe with sector and country metadata."),
+                        (
+                            "Define",
+                            "Enter an investable universe with sector and country metadata.",
+                        ),
                         ("Rank", "Choose whole-universe or group-neutral ranking."),
                         ("Validate", "Compare development and holdout behavior after costs."),
                     ],
@@ -1222,17 +1522,115 @@ CONTROL_IDS = (
     "rolling",
     "lags",
     "comparisons",
-    "residualizations",
+    "attribution-mode",
+    "residual-targets",
+    "residual-controls",
+    "sequential-order",
 )
 
 
 @app.callback(Output("selected", "options"), Output("selected", "value"), Input("preset", "value"))
 def select_preset(preset):
-    factors = preset_factors(preset)
+    factors = available_factors(preset)
     return (
         [{"label": f"{f.label} [{f.id}]", "value": f.id} for f in factors],
         [f.id for f in factors],
     )
+
+
+@app.callback(
+    Output("residual-targets", "options"),
+    Output("residual-controls", "options"),
+    Output("sequential-order", "options"),
+    Output("residual-targets", "value"),
+    Output("residual-controls", "value"),
+    Output("sequential-order", "value"),
+    Input("preset", "value"),
+    Input("selected", "value"),
+    Input("extra", "value"),
+    Input("advanced", "value"),
+    State("residual-targets", "value"),
+    State("residual-controls", "value"),
+    State("sequential-order", "value"),
+)
+def attribution_choices(preset, selected, extra, advanced, targets, controls, order):
+    try:
+        factors = editor_factors(preset, selected, extra, advanced)
+        # Validate editable definitions before using their IDs in the selectors.
+        factors = [FactorSpec.model_validate(f) for f in factors]
+        ids = list(dict.fromkeys(f.id for f in factors))
+        options = [{"label": f"{f.label} [{f.id}]", "value": f.id} for f in factors]
+    except (ValueError, TypeError):
+        ids, options = [], []
+    kept = list(dict.fromkeys(v for v in (order or []) if v in ids))
+    return (
+        options,
+        options,
+        options,
+        [v for v in (targets or []) if v in ids],
+        [v for v in (controls or []) if v in ids],
+        kept + [v for v in ids if v not in kept],
+    )
+
+
+@app.callback(
+    Output("control-attribution-settings", "style"),
+    Output("sequential-attribution-settings", "style"),
+    Input("attribution-mode", "value"),
+)
+def show_attribution_settings(mode):
+    return (
+        {"display": "block" if mode == "controls" else "none"},
+        {"display": "block" if mode == "sequential" else "none"},
+    )
+
+
+@app.callback(Output("sequential-order-preview", "children"), Input("sequential-order", "value"))
+def show_order(order):
+    return " → ".join(f"{i + 1}. {key}" for i, key in enumerate(order or []))
+
+
+@app.callback(Output("source-guidance", "children"), Input("source", "value"))
+def explain_source(source):
+    return data_source_guidance(source)
+
+
+@app.callback(Output("cs-source-guidance", "children"), Input("cs-source", "value"))
+def explain_cross_section_source(source):
+    guidance = data_source_guidance(source)
+    if source == "yahoo":
+        return guidance.replace(
+            " The Fama–French preset separately downloads official research files.", ""
+        )
+    return guidance
+
+
+@app.callback(Output("pack-summary", "children"), Input("preset", "value"))
+def describe_pack(preset):
+    pack = pack_for(preset)
+    if not pack:
+        return "YAML packs are loaded from the local factor_packs folder at startup."
+    items = [html.P(pack.description), html.P("Sources: " + ", ".join(pack.sources))]
+    if pack.level_factors:
+        items.append(html.P(f"Study currency: {pack.currency} · Calendar: {pack.calendar}"))
+        items.append(
+            html.Ul(
+                [
+                    html.Li(
+                        f"{f.label}: {f.transform} of "
+                        + " + ".join(f"{weight:g} × {key}" for key, weight in f.legs.items())
+                    )
+                    for f in pack.level_factors
+                ]
+            )
+        )
+        items.append(
+            html.P(
+                "The stock remains in simple total returns. Factor transformations apply "
+                "at the selected frequency. Bloomberg mappings must be verified locally."
+            )
+        )
+    return items
 
 
 @app.callback(
@@ -1256,12 +1654,25 @@ def frequency_defaults(frequency):
 )
 def update_result(_clicks, source, *controls):
     try:
+        pack = pack_for(controls[1])
+        if pack and (
+            not pack.enabled
+            or source not in pack.sources
+            or (pack.level_factors and source != "configured")
+        ):
+            return html.P(
+                "This YAML pack requires an enabled configuration and source: "
+                + ", ".join(pack.sources)
+            )
+        if pack and (controls[4] or "").strip():
+            return html.P("Clear the JSON override to run a YAML pack, or choose Custom factors.")
         request = build_request(*controls)
     except (ValueError, ValidationError):
         return html.P(
             "Invalid settings. Check factor syntax, dates, unique IDs and sample size; "
             "minimum and rolling windows must exceed the factor count plus HAC lags plus one. "
-            "Comparison IDs must be selected factors; residualization controls cannot be targets."
+            "Comparison IDs must be selected factors; controls cannot be targets. Sequential order "
+            "must include every selected factor exactly once."
         )
     try:
         # Validation is intentionally separate from provider execution.

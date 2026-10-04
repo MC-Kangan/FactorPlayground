@@ -1,0 +1,32 @@
+id: energy_yahoo
+label: "Energy \xB7 Yahoo ETF proxies"
+sources:
+- demo
+- yahoo
+description: Futures-based ETP return proxies with roll, collateral and fee effects.
+  These are not spot commodity prices.
+factors:
+- id: brent
+  label: Brent ETP
+  kind: asset_return
+  instrument:
+    market: US
+    symbol: BNO
+- id: wti
+  label: WTI ETP
+  kind: asset_return
+  instrument:
+    market: US
+    symbol: USO
+- id: gas
+  label: US natural gas ETP
+  kind: asset_return
+  instrument:
+    market: US
+    symbol: UNG
+- id: gasoline
+  label: Gasoline ETP
+  kind: asset_return
+  instrument:
+    market: US
+    symbol: UGA

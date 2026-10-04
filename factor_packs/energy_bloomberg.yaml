@@ -1,0 +1,41 @@
+id: energy_bloomberg
+label: "Energy \xB7 Bloomberg prices and crack spread"
+enabled: false
+sources:
+- configured
+currency: USD
+calendar: weekdays
+description: 'Template: replace tickers, verify calendars, currency and unit conversion
+  scales, then set enabled: true. Diesel minus Brent is formed in USD/barrel before
+  differencing. Continuous futures roll jumps are not corrected. Use a USD-normalized
+  stock or a firm FX adapter.'
+inputs:
+  brent:
+    security: REPLACE_BRENT Comdty
+    field: PX_LAST
+    currency: USD
+    unit: USD/barrel
+    scale: 1
+  diesel:
+    security: REPLACE_DIESEL Comdty
+    field: PX_LAST
+    currency: USD
+    unit: USD/barrel
+    scale: 1
+level_factors:
+- id: brent
+  label: Brent log change
+  legs:
+    brent: 1
+  transform: log_return
+- id: diesel
+  label: Diesel price change
+  legs:
+    diesel: 1
+  transform: difference
+- id: crack
+  label: Diesel minus Brent crack change
+  legs:
+    diesel: 1
+    brent: -1
+  transform: difference
