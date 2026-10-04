@@ -1,10 +1,12 @@
 import json
 
+import plotly.graph_objects as go
 import pytest
 from app import (
     app,
     build_cross_section_request,
     build_request,
+    graph,
     render_cross_section_result,
     render_result,
     run_cross_section_study,
@@ -101,6 +103,13 @@ def test_analysis_callbacks_run_only_from_explicit_buttons():
         "cs-universe",
         "cs-grouping",
     }
+
+
+def test_graph_has_a_bounded_dash_container_height():
+    props = graph(go.Figure()).to_plotly_json()["props"]
+
+    assert props["className"] == "research-graph"
+    assert props["style"] == {"height": "390px"}
 
 
 def test_cross_section_demo_and_rendering():

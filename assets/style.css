@@ -88,7 +88,7 @@ footer { margin-top: 25px; color: var(--muted); font-size: 10px; letter-spacing:
 .Select-control { min-height: 40px; border-color: var(--line-strong) !important; border-radius: 7px !important; }
 .Select-value-label, .Select-placeholder { font-size: 11px !important; }
 .Select-menu-outer { z-index: 1005 !important; font-size: 11px !important; }
-.js-plotly-plot { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 10px; }
+.research-graph { border-top: 1px solid var(--line); margin-top: 18px; }
 
 @media (max-width: 1120px) {
   .shell { padding: 26px; }

@@ -117,6 +117,7 @@ WARNINGS = {
 }
 
 TODAY = datetime.now(UTC).date()
+GRAPH_HEIGHT_PX = 390
 
 
 def instrument(text):
@@ -313,7 +314,7 @@ def finish_figure(figure, title, *, yaxis_title=None, percent_axis=False):
     figure.update_layout(
         title={"text": title, "font": {"size": 15, "color": "#17344d"}},
         template="plotly_white",
-        height=390,
+        height=GRAPH_HEIGHT_PX,
         margin={"l": 52, "r": 22, "t": 62, "b": 45},
         hovermode="x unified",
         colorway=["#116653", "#3c6e9b", "#c08a36", "#765c91", "#819a56"],
@@ -333,6 +334,8 @@ def graph(figure):
     return dcc.Graph(
         figure=figure,
         config={"displaylogo": False, "responsive": True, "scrollZoom": False},
+        className="research-graph",
+        style={"height": f"{GRAPH_HEIGHT_PX}px"},
     )
 
 
