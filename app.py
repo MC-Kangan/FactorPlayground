@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import threading
 import uuid
@@ -14,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, dcc, html
+from dash import ALL, Dash, Input, Output, State, dcc, html
 from demo_data import cross_section_demo_request, demo_request
 from pydantic import ValidationError
 
@@ -395,6 +396,52 @@ def _number(value):
     return "—" if value is None else f"{value:.3f}"
 
 
+def _p_value(value):
+    if value is None:
+        return "—"
+    return "<0.001" if value < 0.001 else f"{value:.3f}"
+
+
+def scenario_impact(moves, identities):
+    if len(moves or []) != len(identities or []):
+        raise ValueError("Scenario inputs do not match the fitted factors")
+    rows = []
+    total_bps = 0.0
+    for raw_move, identity in zip(moves, identities, strict=True):
+        move = 0.0 if raw_move in (None, "") else float(raw_move)
+        beta = float(identity["beta"])
+        if not math.isfinite(move) or not math.isfinite(beta):
+            raise ValueError("Scenario values must be finite")
+        contribution_bps = beta * move * 10_000
+        total_bps += contribution_bps
+        rows.append(
+            {
+                "term": identity["term"],
+                "label": identity["label"],
+                "move": move,
+                "beta": beta,
+                "contribution_bps": contribution_bps,
+            }
+        )
+    return rows, total_bps
+
+
+def scenario_inputs(presentation):
+    units = {
+        coefficient["term"]: coefficient["unit"]
+        for coefficient in presentation["coefficients"][1:]
+    }
+    return [
+        {
+            "term": coefficient["term"],
+            "label": coefficient["label"],
+            "beta": coefficient["estimate"],
+            "unit": units[coefficient["term"]],
+        }
+        for coefficient in presentation["comparisons"][0]["coefficients"][1:]
+    ]
+
+
 def finish_figure(figure, title, *, yaxis_title=None, percent_axis=False):
     figure.update_layout(
         title={"text": title, "font": {"size": 15, "color": "#17344d"}},
@@ -553,20 +600,37 @@ def render_relationships(p):
     if not rows:
         return []
     labels = [r["label"] for r in rows]
+    original_joint = {
+        coefficient["term"]: coefficient["estimate"]
+        for coefficient in p["comparisons"][0]["coefficients"][1:]
+    }
     children = [
         html.H3("Factor relationships · original inputs"),
         html.P(
-            "All diagnostics use the regression's aligned sample and configured returns or changes, "
+            "All diagnostics use the regression's aligned sample and configured returns or "
+            "changes, "
             "not price levels. Partial correlation removes all other selected factors from both "
             "the stock and the factor. Incremental R² removes one factor from the full model; "
             "contributions do not add up when factors share information. These are historical "
             "associations, not significance rankings or forecasts."
         ),
         table(
-            ["Factor", "Pearson", "Spearman", "Partial correlation", "Incremental R² · pp"],
+            [
+                "Factor",
+                "Univariate beta",
+                "Original joint beta",
+                "Univariate R²",
+                "Pearson",
+                "Spearman",
+                "Partial correlation",
+                "Incremental R² · pp",
+            ],
             [
                 [
                     r["label"],
+                    _number(r["univariate_beta"]),
+                    _number(original_joint[r["term"]]),
+                    f"{r['univariate_r_squared']:.1%}",
                     _number(r["pearson"]),
                     _number(r["spearman"]),
                     _number(r["partial_correlation"]),
@@ -638,7 +702,8 @@ def render_relationships(p):
             [
                 graph(fig),
                 html.P(
-                    f"Window: {p['rolling_window']} aligned observations, sampled at each month's last "
+                    f"Window: {p['rolling_window']} aligned observations, sampled at each "
+                    "month's last "
                     "retained observation. Spearman lines can be enabled in the legend. "
                     "Overlapping windows are descriptive; missing dates can extend calendar spans."
                 ),
@@ -727,6 +792,8 @@ def render_result(report, source):
     details.append(
         html.P(
             f"R²: {p['r_squared']:.1%} · Adjusted R²: {p['adjusted_r_squared']:.1%} · "
+            f"HAC joint F: {_number(p['joint_factor_f_statistic'])} "
+            f"(p={_p_value(p['joint_factor_p_value'])}) · "
             f"Covariance: {p['covariance']} · Selected-basis condition: {p['condition_number']:.2f}"
         )
     )
@@ -738,11 +805,12 @@ def render_result(report, source):
     )
     details.append(
         table(
-            ["Factor", "Coefficient", "95% interval", "Input unit"],
+            ["Factor", "Coefficient", "Standardized beta", "95% interval", "Input unit"],
             [
                 [
                     c["label"],
                     f"{c['estimate']:.5f}",
+                    _number(c["standardized_effect"]),
                     "Withheld: irregular dates"
                     if c["lower_95"] is None
                     else f"[{c['lower_95']:.5f}, {c['upper_95']:.5f}]",
@@ -750,6 +818,85 @@ def render_result(report, source):
                 ]
                 for c in coefficients
             ],
+        )
+    )
+    diagnostic = p.get("residual_diagnostics")
+    if diagnostic:
+        details.append(
+            html.Details(
+                [
+                    html.Summary("Residual diagnostics · autocorrelation, tails and volatility"),
+                    html.P(
+                        "Small p-values flag assumptions for review; they do not select factors. "
+                        "Jarque–Bera describes tail/shape departures. HAC intervals are asymptotic "
+                        "and do not require exactly normal residuals. Lag-based tests are withheld "
+                        "when retained dates are irregular."
+                    ),
+                    table(
+                        ["Test", "Statistic", "p-value", "Lag"],
+                        [
+                            ["Durbin–Watson", _number(diagnostic["durbin_watson"]), "—", 1],
+                            [
+                                "Ljung–Box",
+                                _number(diagnostic["ljung_box_statistic"]),
+                                _p_value(diagnostic["ljung_box_p_value"]),
+                                diagnostic["lag"],
+                            ],
+                            [
+                                "Jarque–Bera",
+                                _number(diagnostic["jarque_bera_statistic"]),
+                                _p_value(diagnostic["jarque_bera_p_value"]),
+                                "—",
+                            ],
+                            [
+                                "ARCH LM",
+                                _number(diagnostic["arch_lm_statistic"]),
+                                _p_value(diagnostic["arch_lm_p_value"]),
+                                diagnostic["lag"],
+                            ],
+                        ],
+                    ),
+                ]
+            )
+        )
+    scenario_coefficients = scenario_inputs(p)
+    details.append(
+        html.Details(
+            [
+                html.Summary("Factor-move scenario · original economic factors"),
+                html.P(
+                    "Enter each hypothetical move in the factor's stated input unit: 0.01 means "
+                    "1% for decimal-return factors, while price-change factors use their declared "
+                    "price unit. Contributions use the original joint-model beta, even when the "
+                    "attribution view is orthogonalized. This is a linear sensitivity, not a "
+                    "forecast; the intercept and residual are excluded."
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Label(f"{coefficient['label']} · {coefficient['unit']}"),
+                                dcc.Input(
+                                    id={
+                                        "type": "factor-scenario-move",
+                                        "term": coefficient["term"],
+                                        "label": coefficient["label"],
+                                        "beta": coefficient["beta"],
+                                    },
+                                    type="number",
+                                    value=0,
+                                    step="any",
+                                    debounce=True,
+                                ),
+                            ],
+                            className="field",
+                        )
+                        for coefficient in scenario_coefficients
+                    ],
+                    className="scenario-grid",
+                ),
+                html.Div(id="scenario-output"),
+            ]
         )
     )
     chart = go.Figure(
@@ -1067,8 +1214,9 @@ def single_stock_workspace():
                         dcc.Dropdown(searchable=False, id="selected", multi=True),
                     ),
                     help_text(
-                        "A YAML pack loads its factors here automatically. Select or remove individual "
-                        "factors before running. Disabled YAML packs must be configured and enabled in "
+                        "A YAML pack loads its factors here automatically. Select or remove "
+                        "individual factors before running. Disabled YAML packs must be configured "
+                        "and enabled in "
                         "their files, then the app must be restarted."
                     ),
                     field(
@@ -1161,7 +1309,8 @@ def single_stock_workspace():
                         ),
                     ),
                     help_text(
-                        f"JSON replaces the selections above. Maximum {MAX_FACTOR_COUNT} factors, subject to sample size."
+                        f"JSON replaces the selections above. Maximum {MAX_FACTOR_COUNT} factors, "
+                        "subject to sample size."
                     ),
                 ],
             ),
@@ -1260,7 +1409,8 @@ def single_stock_workspace():
                 id="result",
                 children=empty_state(
                     "Explain a stock's historical returns",
-                    "Estimate factor exposures, inspect collinearity and see how coefficients change through time.",
+                    "Estimate factor exposures, inspect collinearity and see how coefficients "
+                    "change through time.",
                     [
                         ("Choose", "Set a stock, data source and factor family."),
                         ("Refine", "Remove factors or add benchmarks relevant to your thesis."),
@@ -1277,7 +1427,8 @@ def single_stock_workspace():
             workspace_header(
                 "TIME-SERIES ATTRIBUTION",
                 "Single-stock analysis",
-                "Explain one stock's historical returns with research factors, traded benchmarks and custom spreads.",
+                "Explain one stock's historical returns with research factors, traded benchmarks "
+                "and custom spreads.",
                 ["Regression", "Rolling exposure", "Collinearity"],
             ),
             html.Div([controls, results], className="workspace-grid"),
@@ -1335,7 +1486,8 @@ def cross_section_workspace():
                         ),
                     ),
                     help_text(
-                        "MARKET:SYMBOL | sector | country | optional member-from | optional member-to"
+                        "MARKET:SYMBOL | sector | country | optional member-from | "
+                        "optional member-to"
                     ),
                     field(
                         "Universe history",
@@ -1425,7 +1577,8 @@ def cross_section_workspace():
                         dcc.Input(id="cs-cost", value=10, type="number"),
                     ),
                     help_text(
-                        "Grouped runs need enough eligible stocks in each group to form every quantile."
+                        "Grouped runs need enough eligible stocks in each group to form every "
+                        "quantile."
                     ),
                 ],
             ),
@@ -1445,7 +1598,8 @@ def cross_section_workspace():
                 id="cs-result",
                 children=empty_state(
                     "Test whether a signal ranks future returns",
-                    "Evaluate 12–1 momentum with rank IC, quantile returns, turnover, costs and a chronological holdout.",
+                    "Evaluate 12–1 momentum with rank IC, quantile returns, turnover, costs and a "
+                    "chronological holdout.",
                     [
                         (
                             "Define",
@@ -1465,7 +1619,8 @@ def cross_section_workspace():
             workspace_header(
                 "SIGNAL VALIDATION",
                 "Cross-sectional analysis",
-                "Test whether a ranking signal separates subsequent returns across an editable stock universe.",
+                "Test whether a ranking signal separates subsequent returns across an editable "
+                "stock universe.",
                 ["Rank IC", "Quantiles", "Holdout"],
             ),
             html.Div([controls, results], className="workspace-grid"),
@@ -1475,7 +1630,7 @@ def cross_section_workspace():
 
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
-app = Dash(__name__, title="Factor Playground")
+app = Dash(__name__, title="Factor Playground", suppress_callback_exceptions=True)
 app.layout = html.Div(
     [
         html.Header(
@@ -1485,7 +1640,8 @@ app.layout = html.Div(
                         html.Div("TRADE RESEARCH", className="eyebrow"),
                         html.H1("Factor Playground"),
                         html.P(
-                            "A local research console for transparent factor attribution and signal validation."
+                            "A local research console for transparent factor attribution and "
+                            "signal validation."
                         ),
                     ]
                 ),
@@ -1700,6 +1856,53 @@ def update_result(_clicks, source, *controls):
             f"Study failed. Stage: execution · Code: {type(error).__name__} · "
             f"Reference: {reference}. Check provider configuration. Raw payloads are not logged."
         )
+
+
+@app.callback(
+    Output("scenario-output", "children"),
+    Input(
+        {
+            "type": "factor-scenario-move",
+            "term": ALL,
+            "label": ALL,
+            "beta": ALL,
+        },
+        "value",
+    ),
+    State(
+        {
+            "type": "factor-scenario-move",
+            "term": ALL,
+            "label": ALL,
+            "beta": ALL,
+        },
+        "id",
+    ),
+)
+def update_scenario(moves, identities):
+    try:
+        rows, total_bps = scenario_impact(moves, identities)
+    except (TypeError, ValueError, KeyError):
+        return html.P("Enter finite numerical factor moves.")
+    if not rows:
+        return html.P("Run a factor study before entering a scenario.")
+    return html.Div(
+        [
+            table(
+                ["Factor", "Move", "Beta", "Contribution · bp"],
+                [
+                    [
+                        row["label"],
+                        f"{row['move']:.5g}",
+                        f"{row['beta']:.5g}",
+                        f"{row['contribution_bps']:.1f}",
+                    ]
+                    for row in rows
+                ],
+            ),
+            html.P(f"Total modelled factor contribution: {total_bps:.1f} bp."),
+        ]
+    )
 
 
 CS_CONTROL_IDS = (

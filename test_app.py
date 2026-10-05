@@ -3,6 +3,7 @@ import json
 import plotly.graph_objects as go
 import pytest
 from app import (
+    _p_value,
     app,
     build_cross_section_request,
     build_request,
@@ -12,6 +13,8 @@ from app import (
     render_result,
     run_cross_section_study,
     run_study,
+    scenario_impact,
+    scenario_inputs,
     select_preset,
     update_result,
 )
@@ -123,6 +126,49 @@ def test_yaml_pack_end_to_end_and_subset():
     coefficients = report["results"][0]["presentation"]["coefficients"]
     assert len(coefficients) == 3
     assert "Fama–French" in data_source_guidance("yahoo")
+
+
+def test_single_stock_diagnostics_and_scenario_panel():
+    report = run_study("demo", *controls())
+    rendered = str(render_result(report, "demo"))
+
+    assert "Univariate beta" in rendered
+    assert "Residual diagnostics" in rendered
+    assert "Factor-move scenario" in rendered
+
+
+def test_scenario_impact_uses_original_factor_units_and_excludes_intercept():
+    rows, total = scenario_impact(
+        [0.01, -2.0],
+        [
+            {"term": "market", "label": "Market", "beta": 1.2},
+            {"term": "oil", "label": "Oil change", "beta": 0.003},
+        ],
+    )
+
+    assert rows[0]["contribution_bps"] == pytest.approx(120)
+    assert rows[1]["contribution_bps"] == pytest.approx(-60)
+    assert total == pytest.approx(60)
+
+
+def test_scenario_inputs_use_original_joint_model_not_orthogonalized_coefficients():
+    presentation = run_study("demo", *controls())["results"][0]["presentation"]
+    expected = presentation["comparisons"][0]["coefficients"][1:]
+    for coefficient in presentation["coefficients"][1:]:
+        coefficient["estimate"] = 999.0
+        coefficient["label"] += " (residualized)"
+
+    inputs = scenario_inputs(presentation)
+
+    assert [row["beta"] for row in inputs] == [row["estimate"] for row in expected]
+    assert all("residualized" not in row["label"] for row in inputs)
+    assert all(row["unit"] for row in inputs)
+
+
+def test_p_values_do_not_render_small_results_as_zero():
+    assert _p_value(None) == "—"
+    assert _p_value(0.0004) == "<0.001"
+    assert _p_value(0.0346) == "0.035"
 
 
 def test_yaml_pack_is_directly_selectable_in_main_factor_controls():

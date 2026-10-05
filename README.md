@@ -189,6 +189,27 @@ in the legend. Partial correlation is blank if the reduced stock regression leav
 meaningful residual variation. These are descriptive measures, not selection rules,
 causal effects or predictive tests. Original-model coefficients remain in Model comparison.
 
+## Regression diagnostics and scenarios
+
+The results distinguish **univariate beta** (one separate regression per original
+factor) from the **original joint beta** and selected-basis coefficient. Large gaps
+between univariate and joint estimates reveal specification sensitivity, often from
+overlapping factors; they do not choose the preferred model automatically. The existing
+standardized-effect chart is the standardized beta, comparable across factor units.
+
+The summary includes adjusted R² and a HAC joint-factor F test. Open **Residual
+diagnostics** for Durbin-Watson, Ljung-Box, Jarque-Bera and ARCH LM results. Small
+p-values are review flags, not an automatic factor-deletion rule. Lag-based tests are
+withheld when retained dates are irregular.
+
+Open **Factor-move scenario** and enter hypothetical moves in each original economic
+factor's displayed unit. For decimal returns, `0.01` means 1%; commodity price changes
+use the pack's declared price unit. The app always uses the original joint-model betas,
+even when the attribution view is orthogonalized. It shows `beta × move` in basis points
+and excludes the intercept and unexplained residual. It is a linear sensitivity, not a
+forecast or reconciled P&L attribution. See the backend
+[interpretation guide](../TradeAgent/docs/factor-diagnostics-scenarios.md).
+
 Named model subsets still use `Model name | factor_id,other_id`. Factor IDs appear
 in selection labels; manually entered extra factors use `extra_0`, `extra_1`, etc.
 
