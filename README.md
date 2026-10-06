@@ -78,10 +78,11 @@ For Bloomberg mappings, units, currencies and BPIPE limitations, follow the
 1. Choose **Single-stock attribution** or **Cross-sectional signals** from the top
    navigation. Each workspace keeps core settings open and groups less common controls
    into expandable sections.
-2. Start with Synthetic demo. It creates deterministic USD observations on the
-   target calendar, even for a European stock; it does not imitate real FX or market history.
+2. When `TRADE_RESEARCH_CONFIG` selects Bloomberg, the configured Bloomberg source is
+   selected by default. Otherwise start with Synthetic demo for an offline UI check.
 3. Enter a stock such as US:AAPL or XETRA:SAP.
-4. Choose French, US ETF or Custom. Remove any unwanted preset factors.
+4. Select one or more factor packs, for example MSCI plus Energy. Then remove any
+   individual factors you do not want in this run.
 5. Add as many extra benchmarks as the sample can support, one per line:
    `Pharma | US:IHE`
    or `Growth minus value | US:IWF | US:IWD`.
@@ -92,6 +93,9 @@ For Bloomberg mappings, units, currencies and BPIPE limitations, follow the
    R² measures historical explanation, not predictability. The standardized-effect
    chart helps compare factors with different units. Plotly charts support hover,
    zoom, pan and image export from their graph toolbar.
+8. Open **Data inspector** and click **Load current data** to issue a fresh provider
+   query and inspect the exact aligned returns/changes used by the regression. The
+   preview stays in memory and is not written into the research report.
 
 Monthly is a useful starting point for cross-market research. Only daily/monthly
 are currently implemented. More factors are not automatically better: correlated
@@ -123,21 +127,22 @@ the demo supports the French research catalog only.
 - **Yahoo + French:** adjusted equity/ETF closes, official French files and supported
   EUR/GBP/CHF-to-USD FX. Network availability and Yahoo rate limits can affect results.
 - **Configured backend:** reads existing TRADE_RESEARCH_CONFIG/environment settings.
-  Bloomberg total-return mappings must be explicitly verified. B-PIPE authentication
-  and entitlements remain firm-specific. There is no implicit Yahoo fallback for
-  Bloomberg FX. Use a firm FX adapter or normalized USD inputs.
+  When Bloomberg is configured it is the default single-stock source. Equity histories
+  use `PX_LAST` with explicit normal-dividend, abnormal-dividend and split adjustments;
+  Bloomberg `PX_LAST` currency pairs supply required FX. BLPAPI/BPIPE authentication,
+  mappings and entitlements remain firm-specific, with no Yahoo fallback.
 - **Synthetic demo:** offline controls and numerical integration check only.
 
-Synthetic data is the safe default so the app opens without network access or market-data
-credentials. It is never mixed into a Yahoo or configured-provider result. For a public
+Synthetic data remains the safe default only when Bloomberg is not configured, so the app
+can open without market-data credentials. It is never mixed into a Yahoo or configured-provider result. For a public
 Repsol example, choose **Yahoo + French**, enter `BME:REP`, select the French preset and
 Europe, then choose daily or monthly frequency. The adapter resolves that canonical ID to
 Yahoo's `REP.MC`; the French adapter downloads the corresponding native-frequency files
 from the official Kenneth French library when the study runs.
 
 The **MSCI Europe** preset is for the configured provider. Its canonical index identities
-must be mapped to the firm's exact entitled Bloomberg identifiers, total-return fields,
-currency and return basis in `TRADE_RESEARCH_CONFIG`; the app does not scrape or guess
+must be mapped to the firm's exact entitled Bloomberg identifiers, fields, currency and
+return basis in `TRADE_RESEARCH_CONFIG`; the app does not scrape or guess
 licensed MSCI series. The energy YAML pack for Yahoo uses USO, BNO, UNG and UGA as
 tradable ETP return proxies, whose returns include product structure, collateral, fees and
 futures roll effects. It does not claim to represent spot crude, spot gas or diesel. The Bloomberg YAML templates provide editable price-series mappings and transforms;
@@ -181,7 +186,8 @@ transformations are fitted inside each window. Exact redundant definitions still
 orthogonalization cannot identify independent oil, diesel and crack-change exposures
 when one is exactly the difference of the others.
 
-Open **Relationships and overlap** in the results for stock–factor Pearson/Spearman
+Open **Correlation and collinearity checks · review first** in the results for the
+stock-plus-factor correlation matrix, stock–factor Pearson/Spearman
 correlations, partial correlations controlling for all other factors, same-sample
 incremental R², before/after factor heatmaps, VIF and rolling correlations. Rolling
 correlations use the existing rolling-window setting; Spearman traces can be enabled
@@ -253,7 +259,7 @@ the chronological holdout start. The output shows:
 - turnover, drawdown and development-versus-holdout summaries.
 
 Yahoo runs use adjusted-close returns. Configured runs use TradeAgent's normalized
-return provider, including administrator-mapped Bloomberg total-return data. One study
+return provider, including administrator-mapped Bloomberg data. One study
 must use a common currency and return basis. The synthetic universe is generated only
 for learning and does not represent historical securities.
 
@@ -261,9 +267,10 @@ for learning and does not represent historical securities.
 ## YAML factor packs
 
 Place reusable definitions in `factor_packs/*.yaml` and restart the app. They appear
-in **Factor pack** with a `YAML pack ·` prefix; select a pack and its factors load
-automatically into **Select factors from this pack**, where individual factors can be
-included or removed. **Model comparisons only** never creates factors—it only compares
+in **Factor packs** with a `YAML pack ·` prefix. Select multiple packs and their factors
+load into **Select factors from these packs**, where individual factors can be included
+or removed. Duplicate factor IDs are rejected instead of silently overwriting a series.
+**Model comparisons only** never creates factors—it only compares
 subsets of the factors already selected. All
 selectors now show their choices without a search input. Set
 `FACTOR_PLAYGROUND_PACK_DIR` to use another local directory, such as a firm repo.
@@ -273,7 +280,8 @@ The Bloomberg MSCI and energy templates are disabled until you replace the place
 tickers, verify units/scales/calendar and set `enabled: true`. The energy template
 shows how to form diesel minus Brent from compatible price levels before applying a
 first difference. Simple returns and log returns are also supported at daily/monthly
-frequency. Stock returns retain their existing simple total-return convention.
+frequency. Bloomberg stock returns use corporate-action-adjusted `PX_LAST`; Yahoo stock
+returns use adjusted close.
 
 For the schema, Repsol currency considerations and backend configuration, see
 [the YAML pack guide](../TradeAgent/docs/factor-yaml-packs.md). Pack definitions are

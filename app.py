@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import plotly.graph_objects as go
+import numpy as np
 from dash import ALL, Dash, Input, Output, State, dcc, html
 from demo_data import cross_section_demo_request, demo_request
 from pydantic import ValidationError
@@ -23,7 +24,7 @@ from trade_research.domain import AnalysisRequest, InstrumentId
 from trade_research.domain.factors import preset_factors
 from trade_research.domain.models import MAX_FACTOR_COUNT, FactorSpec
 from trade_research.engine import ResearchEngine
-from trade_research.factor_packs import load_factor_packs
+from trade_research.factor_packs import load_factor_packs, merge_factor_packs
 from trade_research.settings import Settings
 from trade_research.skills.cross_sectional_signal import (
     CrossSectionalSignalParameters,
@@ -132,9 +133,9 @@ SOURCE_GUIDANCE = {
         "indexes are rejected because their return conventions are not verified."
     ),
     "configured": (
-        "Uses the provider configured for TradeAgent, including entitled Bloomberg return "
-        "series. MSCI and commodity indexes require explicit identifier, field, currency and "
-        "return-basis mappings; there is no silent public-data fallback."
+        "Uses the provider configured for TradeAgent. With Bloomberg, equities use adjusted "
+        "PX_LAST and FX uses Bloomberg currency pairs. MSCI and commodity indexes require "
+        "verified identifiers, fields, units and entitlements; there is no public-data fallback."
     ),
 }
 PACK_DIRECTORY = Path(
@@ -143,10 +144,21 @@ PACK_DIRECTORY = Path(
 FACTOR_PACKS = load_factor_packs(PACK_DIRECTORY)
 
 
-def available_factors(preset):
-    if preset.startswith("pack:"):
-        return pack_for(preset).selected_factors()
-    return preset_factors(preset)
+def selected_pack_values(presets):
+    if not isinstance(presets, list) or not presets:
+        raise ValueError("Choose at least one factor pack")
+    return presets
+
+
+def available_factors(presets):
+    factors = []
+    for preset in selected_pack_values(presets):
+        pack = pack_for(preset)
+        factors.extend(pack.selected_factors() if pack else preset_factors(preset))
+    ids = [factor.id for factor in factors]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Selected packs contain duplicate factor IDs; deselect one duplicate")
+    return tuple(factors)
 
 
 def pack_for(preset):
@@ -155,6 +167,33 @@ def pack_for(preset):
     if preset[5:] not in FACTOR_PACKS:
         raise ValueError("Unknown YAML factor pack")
     return FACTOR_PACKS[preset[5:]]
+
+
+def packs_for(presets):
+    return tuple(
+        pack
+        for value in selected_pack_values(presets)
+        if (pack := pack_for(value)) is not None
+    )
+
+
+def bloomberg_is_configured():
+    try:
+        return Settings.from_environment(os.environ).price_provider == "bloomberg"
+    except Exception:
+        return False
+
+
+BLOOMBERG_DEFAULT = bloomberg_is_configured()
+DEFAULT_SOURCE = "configured" if BLOOMBERG_DEFAULT else "demo"
+DEFAULT_PACKS = (
+    [
+        "pack:" + pack.id
+        for pack in FACTOR_PACKS.values()
+        if pack.enabled and "configured" in pack.sources
+    ][:1]
+    or (["msci_europe"] if BLOOMBERG_DEFAULT else ["french"])
+)
 
 
 def data_source_guidance(source):
@@ -181,9 +220,9 @@ def parse_lines(text):
     return rows
 
 
-def editor_factors(preset, selected, extra, advanced):
+def editor_factors(presets, selected, extra, advanced):
     factors = [
-        f.model_dump(mode="json") for f in available_factors(preset) if f.id in (selected or [])
+        f.model_dump(mode="json") for f in available_factors(presets) if f.id in (selected or [])
     ]
     # Each line adds a funded benchmark; two legs make a self-financing spread.
     for i, line in enumerate((extra or "").splitlines()):
@@ -220,7 +259,7 @@ def editor_factors(preset, selected, extra, advanced):
 
 def build_request(
     stock,
-    preset,
+    presets,
     selected,
     extra,
     advanced,
@@ -237,7 +276,7 @@ def build_request(
     residual_controls,
     sequential_order,
 ):
-    factors = editor_factors(preset, selected, extra, advanced)
+    factors = editor_factors(presets, selected, extra, advanced)
     if attribution_mode not in {"original", "controls", "sequential"}:
         raise ValueError("Choose a supported attribution mode")
     if attribution_mode == "controls" and (not residual_targets or not residual_controls):
@@ -246,7 +285,11 @@ def build_request(
         raise ValueError("Choose an explicit factor order")
     params = FactorRegressionParameters.model_validate(
         dict(
-            preset="custom" if pack_for(preset) else preset,
+            preset=(
+                presets[0]
+                if len(selected_pack_values(presets)) == 1 and not pack_for(presets[0])
+                else "custom"
+            ),
             factors=factors,
             frequency=frequency,
             region=region,
@@ -275,19 +318,27 @@ def build_request(
     )
 
 
-def run_study(source, *controls):
+def study_context(source, *controls):
     request = build_request(*controls)
-    pack = pack_for(controls[1])
-    if pack:
+    packs = packs_for(controls[1])
+    selected = {f["id"] for f in request.skill_parameters["factor-regression"]["factors"]}
+    selected_packs = []
+    for pack in packs:
         if not pack.enabled or source not in pack.sources:
             raise ValueError("Choose a supported source and a configured, enabled factor pack.")
         if (controls[4] or "").strip():
             raise ValueError("Use Custom factors for JSON overrides, not a YAML pack.")
-        selected = {f["id"] for f in request.skill_parameters["factor-regression"]["factors"]}
-        # Fetch only selected pack columns; unselected series must not remove observations.
-        pack = pack.subset(selected)
-        if pack.level_factors and source != "configured":
+        pack_ids = {factor.id for factor in pack.selected_factors()}
+        kept = selected & pack_ids
+        if kept:
+            selected_packs.append(pack.subset(kept))
+        if any(factor.id in selected for factor in pack.level_factors) and source != "configured":
             raise ValueError("Bloomberg level packs require the configured source.")
+    if "french" in controls[1] and any(pack.level_factors for pack in selected_packs):
+        raise ValueError(
+            "Fama–French research returns cannot be mixed with Bloomberg level packs in one "
+            "study. Use a Bloomberg market/style pack with Bloomberg level factors."
+        )
     if source == "demo":
         request = demo_request(request)
         settings = Settings()
@@ -298,13 +349,64 @@ def run_study(source, *controls):
     else:
         raise ValueError("Choose a data source.")
     if source == "configured":
+        combined = None
+        if selected_packs:
+            mapping = next(
+                (
+                    item
+                    for item in settings.bloomberg_return_mappings
+                    if item.instrument == request.instrument
+                ),
+                None,
+            )
+            fallback_currency = next(
+                (pack.currency for pack in selected_packs if pack.currency is not None), "USD"
+            )
+            combined = merge_factor_packs(
+                tuple(selected_packs),
+                study_currency=mapping.currency if mapping is not None else fallback_currency,
+            )
         settings = Settings.model_validate(
             settings.model_dump()
-            | {"bloomberg_factor_pack": pack if pack and pack.level_factors else None}
+            | {
+                "bloomberg_factor_pack": (
+                    combined if combined is not None and combined.level_factors else None
+                )
+            }
         )
+    return request, settings
+
+
+def run_study(source, *controls):
+    request, settings = study_context(source, *controls)
     return asyncio.run(ResearchEngine.from_settings(settings).analyze(request)).model_dump(
         mode="json"
     )
+
+
+def run_preview(source, *controls):
+    request, settings = study_context(source, *controls)
+    preview = ResearchEngine.from_settings(settings).factor_study_preview(request).model_dump(
+        mode="json"
+    )
+    requested_instruments = {
+        (item["instrument"]["market"], item["instrument"]["symbol"])
+        for item in preview["inputs"]
+    }
+    preview["configured_mappings"] = [
+        mapping.model_dump(mode="json")
+        for mapping in settings.bloomberg_return_mappings
+        if (mapping.instrument.market, mapping.instrument.symbol) in requested_instruments
+    ]
+    preview["pack_inputs"] = (
+        {
+            key: item.model_dump(mode="json")
+            for key, item in settings.bloomberg_factor_pack.inputs.items()
+        }
+        if settings.bloomberg_factor_pack is not None
+        else {}
+    )
+    return preview
 
 
 def parse_universe(text):
@@ -595,6 +697,157 @@ def table(headings, rows):
     )
 
 
+def render_preview(preview):
+    columns = preview["columns"]
+    rows = preview["rows"]
+    if not rows:
+        return html.P("No aligned observations are available for inspection.")
+    values = np.asarray([row["values"] for row in rows], dtype=float)
+    means = values.mean(axis=0)
+    scales = values.std(axis=0, ddof=1)
+    standardized = np.divide(
+        values - means,
+        scales,
+        out=np.zeros_like(values),
+        where=scales > 1e-14,
+    )
+    figure = go.Figure()
+    for index, column in enumerate(columns):
+        figure.add_scatter(
+            x=[row["end_date"] for row in rows],
+            y=standardized[:, index],
+            name=column["label"],
+            mode="lines",
+        )
+    finish_figure(
+        figure,
+        "Aligned model inputs · standardized for visual comparison",
+        yaxis_title="Standard deviations",
+    )
+    metadata = [
+        [
+            item["role"],
+            f"{item['instrument']['market']}:{item['instrument']['symbol']}",
+            item["source"],
+            item["vendor_field"],
+            item["return_basis"],
+            item["currency"],
+            item["interval_count"],
+        ]
+        for item in preview["inputs"]
+    ]
+    configured_mappings = [
+        [
+            f"{item['instrument']['market']}:{item['instrument']['symbol']}",
+            item["security"],
+            item["field"],
+            item["currency"],
+            item["return_basis"],
+        ]
+        for item in preview.get("configured_mappings", [])
+    ]
+    pack_mappings = [
+        [key, item["security"], item["field"], item["currency"], item["unit"], item["scale"]]
+        for key, item in preview.get("pack_inputs", {}).items()
+    ]
+    raw_rows = [
+        [
+            row["start_date"],
+            row["end_date"],
+            *(f"{value:.8g}" for value in row["values"]),
+        ]
+        for row in rows[-120:]
+    ]
+    return html.Div(
+        [
+            html.H3("Aligned model inputs"),
+            html.P(
+                "This is an in-memory view of the exact returns or changes supplied to the "
+                "regression after frequency conversion, FX conversion and date alignment. The "
+                "chart is standardized only for visual comparison; the table retains model units. "
+                "Licensed vendor payloads are neither logged nor stored in the report."
+            ),
+            table(
+                [
+                    "Role",
+                    "Instrument",
+                    "Source",
+                    "Vendor field",
+                    "Return basis",
+                    "Currency",
+                    "Intervals",
+                ],
+                metadata,
+            ),
+            *(
+                [
+                    html.H4("Configured Bloomberg return mappings"),
+                    table(
+                        ["Instrument", "Bloomberg security", "Field", "Currency", "Basis"],
+                        configured_mappings,
+                    ),
+                ]
+                if configured_mappings
+                else []
+            ),
+            *(
+                [
+                    html.H4("Selected Bloomberg pack inputs"),
+                    table(
+                        ["Input", "Bloomberg security", "Field", "Currency", "Unit", "Scale"],
+                        pack_mappings,
+                    ),
+                ]
+                if pack_mappings
+                else []
+            ),
+            graph(figure),
+            html.P(f"Showing the latest {min(len(rows), 120)} of {len(rows)} aligned rows."),
+            table(
+                ["Start", "End", *(f"{c['label']} · {c['unit']}" for c in columns)],
+                raw_rows,
+            ),
+        ]
+    )
+
+
+def combined_correlation_matrix(presentation):
+    relationships = presentation["relationships"]
+    labels = ["Stock", *(row["label"] for row in relationships)]
+    stock = [float("nan") if row["pearson"] is None else row["pearson"] for row in relationships]
+    factors = presentation["original_factor_correlations"]
+    matrix = [[1.0, *stock]]
+    matrix.extend([[stock[index], *row] for index, row in enumerate(factors)])
+    return labels, matrix
+
+
+def collinearity_recommendations(presentation, *, correlation_limit=0.8, vif_limit=10.0):
+    relationships = {row["term"]: row for row in presentation["relationships"]}
+    full = presentation["comparisons"][0]
+    factor_ids = full["factor_ids"]
+    labels = [relationships[term]["label"] for term in factor_ids]
+    matrix = presentation["original_factor_correlations"]
+    vifs = full["variance_inflation_factors"]
+    suggestions = []
+    for left in range(len(factor_ids)):
+        for right in range(left + 1, len(factor_ids)):
+            correlation_value = matrix[left][right]
+            if abs(correlation_value) < correlation_limit or max(vifs[left], vifs[right]) < vif_limit:
+                continue
+            left_increment = relationships[factor_ids[left]]["incremental_r_squared"]
+            right_increment = relationships[factor_ids[right]]["incremental_r_squared"]
+            remove, keep = (
+                (right, left) if right_increment <= left_increment else (left, right)
+            )
+            suggestions.append(
+                f"Review removing {labels[remove]} before {labels[keep]}: pair correlation "
+                f"is {correlation_value:.2f}, VIFs are {vifs[left]:.1f}/{vifs[right]:.1f}, and "
+                "the suggested removal contributes less incremental R². Confirm the economic "
+                "role and rerun the named-model comparison before excluding it."
+            )
+    return suggestions
+
+
 def render_relationships(p):
     rows = p.get("relationships", [])
     if not rows:
@@ -614,6 +867,38 @@ def render_relationships(p):
             "contributions do not add up when factors share information. These are historical "
             "associations, not significance rankings or forecasts."
         ),
+    ]
+    combined_labels, combined_matrix = combined_correlation_matrix(p)
+    combined_heatmap = go.Figure(
+        go.Heatmap(
+            z=combined_matrix,
+            x=combined_labels,
+            y=combined_labels,
+            zmin=-1,
+            zmax=1,
+            colorscale="RdBu",
+            reversescale=True,
+        )
+    )
+    finish_figure(combined_heatmap, "Stock and factor correlations · original inputs")
+    combined_heatmap.update_layout(hovermode="closest")
+    children.append(graph(combined_heatmap))
+    suggestions = collinearity_recommendations(p)
+    children.extend(
+        [
+            html.H4("Collinearity review"),
+            html.Ul([html.Li(item) for item in suggestions])
+            if suggestions
+            else html.P(
+                "No factor pair crosses both the 0.80 correlation and 10.0 VIF review thresholds."
+            ),
+            html.P(
+                "These are transparent review suggestions, not automatic deletion rules. "
+                "Economic meaning and out-of-sample stability take priority."
+            ),
+        ]
+    )
+    children.append(
         table(
             [
                 "Factor",
@@ -638,8 +923,8 @@ def render_relationships(p):
                 ]
                 for r in rows
             ],
-        ),
-    ]
+        )
+    )
     fig = go.Figure()
     for key in ("pearson", "spearman"):
         fig.add_bar(x=labels, y=[r[key] for r in rows], name=key.title())
@@ -784,9 +1069,10 @@ def render_result(report, source):
     details.append(
         html.Details(
             [
-                html.Summary("Relationships and overlap · correlations, VIF and incremental R²"),
+                html.Summary("Correlation and collinearity checks · review first"),
                 *render_relationships(p),
-            ]
+            ],
+            open=True,
         )
     )
     details.append(
@@ -1152,16 +1438,16 @@ def single_stock_workspace():
                                 {"label": "Synthetic demo · offline", "value": "demo"},
                                 {"label": "Yahoo + French factors", "value": "yahoo"},
                                 {
-                                    "label": "Configured providers · Bloomberg ready",
+                                    "label": "Configured providers · Bloomberg",
                                     "value": "configured",
                                 },
                             ],
-                            value="demo",
+                            value=DEFAULT_SOURCE,
                             clearable=False,
                         ),
                     ),
                     html.P(
-                        data_source_guidance("demo"),
+                        data_source_guidance(DEFAULT_SOURCE),
                         id="source-guidance",
                         className="source-guidance",
                     ),
@@ -1175,10 +1461,11 @@ def single_stock_workspace():
                     ),
                     help_text("Examples: BME:REP for Repsol, US:AAPL, XETRA:SAP."),
                     field(
-                        "Factor pack",
+                        "Factor packs",
                         dcc.Dropdown(
                             searchable=False,
                             id="preset",
+                            multi=True,
                             options=[
                                 {
                                     "label": "Built-in · Fama–French 5 + momentum",
@@ -1204,18 +1491,19 @@ def single_stock_workspace():
                                     "value": "custom",
                                 },
                             ],
-                            value="french",
+                            value=DEFAULT_PACKS,
                             clearable=False,
                         ),
                     ),
                     html.Div(id="pack-summary", className="help-text"),
                     field(
-                        "Select factors from this pack",
+                        "Select factors from these packs",
                         dcc.Dropdown(searchable=False, id="selected", multi=True),
                     ),
                     help_text(
-                        "A YAML pack loads its factors here automatically. Select or remove "
-                        "individual factors before running. Disabled YAML packs must be configured "
+                        "Selected packs are combined here. Select or remove individual factors "
+                        "before running. Duplicate factor IDs across packs are rejected. Disabled "
+                        "YAML packs must be configured "
                         "and enabled in "
                         "their files, then the app must be restarted."
                     ),
@@ -1404,22 +1692,41 @@ def single_stock_workspace():
         className="control-panel",
     )
     results = html.Main(
-        dcc.Loading(
-            html.Div(
-                id="result",
-                children=empty_state(
-                    "Explain a stock's historical returns",
-                    "Estimate factor exposures, inspect collinearity and see how coefficients "
-                    "change through time.",
-                    [
-                        ("Choose", "Set a stock, data source and factor family."),
-                        ("Refine", "Remove factors or add benchmarks relevant to your thesis."),
-                        ("Interpret", "Review coverage first, then exposures and stability."),
-                    ],
-                ),
+        [
+            html.Details(
+                [
+                    html.Summary("Data inspector · query and verify aligned inputs"),
+                    html.P(
+                        "Load this only when you want to inspect the current settings. It performs "
+                        "a fresh provider query and keeps normalized values in memory only."
+                    ),
+                    html.Button(
+                        "Load current data",
+                        id="load-preview",
+                        n_clicks=0,
+                        className="secondary",
+                    ),
+                    dcc.Loading(html.Div(id="preview-output"), type="circle"),
+                ],
+                className="data-inspector",
             ),
-            type="circle",
-        ),
+            dcc.Loading(
+                html.Div(
+                    id="result",
+                    children=empty_state(
+                        "Explain a stock's historical returns",
+                        "Estimate factor exposures, inspect collinearity and see how coefficients "
+                        "change through time.",
+                        [
+                            ("Choose", "Set a stock, data source and factor family."),
+                            ("Refine", "Remove factors or add benchmarks relevant to your thesis."),
+                            ("Interpret", "Review coverage first, then exposures and stability."),
+                        ],
+                    ),
+                ),
+                type="circle",
+            ),
+        ],
         className="results-panel",
     )
     return html.Div(
@@ -1699,8 +2006,13 @@ CONTROL_IDS = (
 
 
 @app.callback(Output("selected", "options"), Output("selected", "value"), Input("preset", "value"))
-def select_preset(preset):
-    factors = available_factors(preset)
+def select_preset(presets):
+    if not presets:
+        return [], []
+    try:
+        factors = available_factors(presets)
+    except ValueError:
+        return [], []
     return (
         [{"label": f"{f.label} [{f.id}]", "value": f.id} for f in factors],
         [f.id for f in factors],
@@ -1722,9 +2034,9 @@ def select_preset(preset):
     State("residual-controls", "value"),
     State("sequential-order", "value"),
 )
-def attribution_choices(preset, selected, extra, advanced, targets, controls, order):
+def attribution_choices(presets, selected, extra, advanced, targets, controls, order):
     try:
-        factors = editor_factors(preset, selected, extra, advanced)
+        factors = editor_factors(presets, selected, extra, advanced)
         # Validate editable definitions before using their IDs in the selectors.
         factors = [FactorSpec.model_validate(f) for f in factors]
         ids = list(dict.fromkeys(f.id for f in factors))
@@ -1775,30 +2087,57 @@ def explain_cross_section_source(source):
 
 
 @app.callback(Output("pack-summary", "children"), Input("preset", "value"))
-def describe_pack(preset):
-    pack = pack_for(preset)
-    if not pack:
+def describe_pack(presets):
+    if not presets:
+        return "Choose one or more factor packs."
+    try:
+        available_factors(presets)
+    except ValueError as error:
+        return html.P(str(error), className="source-guidance")
+    packs = packs_for(presets)
+    if not packs:
         return "YAML packs are loaded from the local factor_packs folder at startup."
-    items = [html.P(pack.description), html.P("Sources: " + ", ".join(pack.sources))]
-    if pack.level_factors:
-        items.append(html.P(f"Study currency: {pack.currency} · Calendar: {pack.calendar}"))
-        items.append(
-            html.Ul(
-                [
-                    html.Li(
-                        f"{f.label}: {f.transform} of "
-                        + " + ".join(f"{weight:g} × {key}" for key, weight in f.legs.items())
-                    )
-                    for f in pack.level_factors
-                ]
-            )
+    items = []
+    for pack in packs:
+        items.extend(
+            [
+                html.H4(pack.label.replace("\\xB7", "·")),
+                html.P(pack.description),
+                html.P("Sources: " + ", ".join(pack.sources)),
+            ]
         )
-        items.append(
-            html.P(
-                "The stock remains in simple total returns. Factor transformations apply "
-                "at the selected frequency. Bloomberg mappings must be verified locally."
+        if pack.level_factors:
+            items.append(html.P(f"Pack currency: {pack.currency} · Calendar: {pack.calendar}"))
+            items.append(
+                html.Ul(
+                    [
+                        html.Li(
+                            f"{key}: {item.security} · {item.field} · "
+                            f"{item.currency} · {item.unit} · scale {item.scale:g}"
+                        )
+                        for key, item in pack.inputs.items()
+                    ]
+                )
             )
+            items.append(
+                html.Ul(
+                    [
+                        html.Li(
+                            f"{f.label}: {f.transform} of "
+                            + " + ".join(
+                                f"{weight:g} × {key}" for key, weight in f.legs.items()
+                            )
+                        )
+                        for f in pack.level_factors
+                    ]
+                )
+            )
+    items.append(
+        html.P(
+            "The stock remains in simple adjusted returns. Factor transformations apply at "
+            "the selected frequency. Bloomberg identifiers and units must be verified locally."
         )
+    )
     return items
 
 
@@ -1823,17 +2162,17 @@ def frequency_defaults(frequency):
 )
 def update_result(_clicks, source, *controls):
     try:
-        pack = pack_for(controls[1])
-        if pack and (
-            not pack.enabled
+        packs = packs_for(controls[1])
+        unavailable = [
+            pack
+            for pack in packs
+            if not pack.enabled
             or source not in pack.sources
             or (pack.level_factors and source != "configured")
-        ):
-            return html.P(
-                "This YAML pack requires an enabled configuration and source: "
-                + ", ".join(pack.sources)
-            )
-        if pack and (controls[4] or "").strip():
+        ]
+        if unavailable:
+            return html.P("One or more selected YAML packs do not support this data source.")
+        if packs and (controls[4] or "").strip():
             return html.P("Clear the JSON override to run a YAML pack, or choose Custom factors.")
         request = build_request(*controls)
     except (ValueError, ValidationError):
@@ -1855,6 +2194,30 @@ def update_result(_clicks, source, *controls):
         return html.P(
             f"Study failed. Stage: execution · Code: {type(error).__name__} · "
             f"Reference: {reference}. Check provider configuration. Raw payloads are not logged."
+        )
+
+
+@app.callback(
+    Output("preview-output", "children"),
+    Input("load-preview", "n_clicks"),
+    State("source", "value"),
+    *[State(k, "value") for k in CONTROL_IDS],
+    prevent_initial_call=True,
+    running=[(Output("load-preview", "disabled"), True, False)],
+)
+def update_preview(_clicks, source, *controls):
+    try:
+        return render_preview(run_preview(source, *controls))
+    except (ValueError, ValidationError):
+        return html.P("Invalid settings. Resolve factor-pack, date or model-input errors first.")
+    except Exception as error:
+        reference = uuid.uuid4().hex
+        logging.getLogger(__name__).error(
+            "factor preview stage=execution code=%s reference=%s", type(error).__name__, reference
+        )
+        return html.P(
+            f"Data preview failed · Code: {type(error).__name__} · Reference: {reference}. "
+            "Check Bloomberg connectivity, entitlements and mappings. Raw payloads are not logged."
         )
 
 

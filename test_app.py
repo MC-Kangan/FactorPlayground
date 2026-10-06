@@ -7,10 +7,16 @@ from app import (
     app,
     build_cross_section_request,
     build_request,
+    bloomberg_is_configured,
+    collinearity_recommendations,
+    combined_correlation_matrix,
     data_source_guidance,
+    describe_pack,
     graph,
     render_cross_section_result,
+    render_preview,
     render_result,
+    run_preview,
     run_cross_section_study,
     run_study,
     scenario_impact,
@@ -21,10 +27,11 @@ from app import (
 
 
 def controls(preset="french", frequency="monthly", extra="", advanced=""):
+    presets = [preset] if isinstance(preset, str) else preset
     return (
         "US:AAPL",
-        preset,
-        select_preset(preset)[1],
+        presets,
+        select_preset(presets)[1],
         extra,
         advanced,
         frequency,
@@ -176,7 +183,7 @@ def test_yaml_pack_is_directly_selectable_in_main_factor_controls():
     layout = json.dumps(response.get_json(), ensure_ascii=False)
 
     assert "YAML pack · Energy" in layout
-    assert "Select factors from this pack" in layout
+    assert "Select factors from these packs" in layout
     assert "Model comparisons only · does not add factors" in layout
     assert "Choose the data source, stock and factor pack in Core setup" in layout
 
@@ -195,10 +202,82 @@ def test_all_dropdowns_are_non_searchable():
 
 
 def test_msci_europe_preset_is_available_in_factor_selector():
-    options, values = select_preset("msci_europe")
+    options, values = select_preset(["msci_europe"])
 
     assert len(options) == 3
     assert values == ["market", "growth_minus_value", "momentum_minus_market"]
+
+
+def test_multiple_factor_packs_can_be_combined_and_individually_filtered():
+    options, values = select_preset(["msci_europe", "pack:energy_yahoo"])
+
+    assert len(options) == 7
+    assert values == [
+        "market",
+        "growth_minus_value",
+        "momentum_minus_market",
+        "brent",
+        "wti",
+        "gas",
+        "gasoline",
+    ]
+
+
+def test_clearing_factor_pack_selection_leaves_an_empty_factor_list():
+    assert select_preset([]) == ([], [])
+
+
+def test_duplicate_factor_ids_across_packs_show_a_controlled_message():
+    presets = ["msci_europe", "pack:msci_bloomberg"]
+
+    assert select_preset(presets) == ([], [])
+    assert "duplicate factor IDs" in str(describe_pack(presets))
+
+
+def test_bloomberg_becomes_default_candidate_when_environment_configures_it(monkeypatch):
+    monkeypatch.setenv("TRADE_RESEARCH_PRICE_PROVIDER", "bloomberg")
+
+    assert bloomberg_is_configured()
+
+
+def test_data_preview_uses_the_same_aligned_model_inputs():
+    preview = run_preview("demo", *controls())
+
+    assert preview["schema_version"] == "factor-study-preview-v1"
+    assert preview["columns"][0]["term"] == "stock"
+    assert len(preview["rows"]) >= 60
+    rendered = str(render_preview(preview))
+    assert "Aligned model inputs" in rendered
+    assert "Vendor field" in rendered
+
+
+def test_combined_matrix_includes_stock_and_collinearity_recommendation():
+    presentation = run_study("demo", *controls())["results"][0]["presentation"]
+    labels, matrix = combined_correlation_matrix(presentation)
+
+    assert labels[0] == "Stock"
+    assert len(matrix) == len(labels)
+    assert matrix[0][0] == 1
+
+    review = {
+        "relationships": [
+            {"term": "oil", "label": "Oil", "incremental_r_squared": 0.08},
+            {"term": "sector", "label": "Energy sector", "incremental_r_squared": 0.01},
+        ],
+        "original_factor_correlations": [[1.0, 0.92], [0.92, 1.0]],
+        "comparisons": [
+            {
+                "factor_ids": ["oil", "sector"],
+                "variance_inflation_factors": [12.0, 12.0],
+                "condition_number": 8.0,
+            }
+        ],
+    }
+    suggestions = collinearity_recommendations(review)
+
+    assert len(suggestions) == 1
+    assert "Energy sector" in suggestions[0]
+    assert "Oil" in suggestions[0]
 
 
 def test_cross_section_demo_and_rendering():
@@ -300,7 +379,7 @@ def test_attribution_choices_preserve_order_and_remove_stale_factors():
     from app import attribution_choices
 
     values = attribution_choices(
-        "us_etf",
+        ["us_etf"],
         ["market", "growth_minus_value"],
         "",
         "",
