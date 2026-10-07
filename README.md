@@ -41,6 +41,10 @@ identifies packages to check with IT, including Bloomberg `blpapi`, platform-spe
 and the `backtesting` license. Windows and live corporate Bloomberg access still require
 validation on your firm machine; local validation was on macOS.
 
+If your company already has a modified version, follow the
+[company merge guide](MERGE_GUIDE.md). It explains which Bloomberg-specific code to preserve,
+which backend modules must move together and how to verify the combined implementation.
+
 ## Start on macOS / Linux
 
 ```sh
@@ -96,8 +100,9 @@ For Bloomberg mappings, units, currencies and BPIPE limitations, follow the
    chart helps compare factors with different units. Plotly charts support hover,
    zoom, pan and image export from their graph toolbar.
 8. Open **Data inspector** and click **Load current data** to issue a fresh provider
-   query and inspect the exact aligned returns/changes used by the regression. The
-   preview stays in memory and is not written into the research report.
+   query. The single chart plots every aligned model input on a standardized scale;
+   hover a date to see its exact model value, unit and currency. The preview stays in
+   memory and is not written into the research report.
 
 Monthly is a useful starting point for cross-market research. Only daily/monthly
 are currently implemented. More factors are not automatically better: correlated
@@ -320,13 +325,22 @@ Bloomberg energy or MSCI YAML pack together, then deselect unwanted factors. The
 backend combines the selected columns before estimation and the data inspector uses
 the identical alignment pipeline.
 
-French models default to USD stock excess returns. Local stock returns are converted
-using Bloomberg FX before the French cash return is subtracted. Bloomberg YAML price
-changes retain their declared units and quotation currency; they are explanatory
-variables rather than automatically converted funded investments. Daily data must
-match both the start and end of each return period; monthly data must represent complete
-months. Gaps are dropped, never filled. Review **Research sources and alignment** in
-the inspector and **Data coverage** in the results for the source-specific losses.
+The combined regression is conceptually `stock excess return = Fama–French factors +
+index-proxy returns + commodity changes + residual`. French models use USD stock excess
+returns, so a local-currency stock is first converted with Bloomberg FX and the French
+cash return is then subtracted once. A funded MSCI or sector index is treated as another
+USD return factor. Oil, gas, diesel and crack-spread series can instead remain declared
+price changes, such as USD/barrel or EUR/MWh; their coefficients retain those economic
+units and standardized betas make their relative influence comparable.
+
+All inputs must describe the same daily or monthly interval. Daily data must match both
+period endpoints; monthly inputs must represent complete months. Gaps are dropped and
+never filled. The app does not rename an index proxy as a Fama–French factor: each series
+keeps a unique ID, source, transform, currency and unit. Because style indices often
+overlap with Fama–French factors, inspect correlation and VIF before interpreting their
+joint betas. Keep the original joint model as the reference and use residualization only
+as a secondary attribution view. Use the inspector chart for visual alignment checks and
+open **Technical diagnostics** for source-specific coverage losses.
 
 French files still require web access to the official Kenneth French library. Pack-only
 studies do not fetch French files. See the backend

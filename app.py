@@ -738,6 +738,26 @@ def table(headings, rows):
     )
 
 
+def coverage_table(coverage):
+    return table(
+        ["Input", "Expected", "Available", "Missing/invalid", "FX losses", "Alignment losses"],
+        [
+            [
+                item[key]
+                for key in (
+                    "role",
+                    "expected_periods",
+                    "available_periods",
+                    "invalid_or_missing_periods",
+                    "fx_endpoint_losses",
+                    "alignment_losses",
+                )
+            ]
+            for item in coverage
+        ],
+    )
+
+
 def render_preview(preview):
     columns = preview["columns"]
     rows = preview["rows"]
@@ -754,124 +774,125 @@ def render_preview(preview):
     )
     figure = go.Figure()
     for index, column in enumerate(columns):
+        unit = column["unit"]
+        currency = column.get("currency") or "study currency"
         figure.add_scatter(
             x=[row["end_date"] for row in rows],
             y=standardized[:, index],
             name=column["label"],
             mode="lines",
+            customdata=values[:, index],
+            hovertemplate=(
+                "%{fullData.name}<br>Date: %{x}<br>Model value: %{customdata:.6g}<br>"
+                f"Unit: {unit}<br>Currency: {currency}<extra></extra>"
+            ),
         )
     finish_figure(
         figure,
         "Aligned model inputs · standardized for visual comparison",
         yaxis_title="Standard deviations",
     )
-    metadata = [
-        [
-            item["role"],
-            f"{item['instrument']['market']}:{item['instrument']['symbol']}",
-            item["source"],
-            item["vendor_field"],
-            item["return_basis"],
-            item["currency"],
-            item["interval_count"],
-        ]
-        for item in preview["inputs"]
-    ]
-    configured_mappings = [
-        [
-            f"{item['instrument']['market']}:{item['instrument']['symbol']}",
-            item["security"],
-            item["field"],
-            item["currency"],
-            item["return_basis"],
-        ]
-        for item in preview.get("configured_mappings", [])
-    ]
-    pack_mappings = [
-        [key, item["security"], item["field"], item["currency"], item["unit"], item["scale"]]
-        for key, item in preview.get("pack_inputs", {}).items()
-    ]
-    raw_rows = [
-        [
-            row["start_date"],
-            row["end_date"],
-            html.H4("Research sources and alignment"),
-            table(
-                ["Source", "Currency convention", "Observations", "Reference"],
+    drill_down = [
+        html.Summary("Input definitions and exact rows"),
+        html.P(
+            "Use this only when a visual alignment check is not enough. It shows normalized "
+            "model inputs and source metadata; licensed vendor payloads are not persisted."
+        ),
+        html.H4("Input definitions"),
+        table(
+            ["Role", "Instrument", "Source", "Vendor field", "Return basis", "Currency", "Intervals"],
+            [
                 [
-                    [d["source"], d["currency"], d["observation_count"], d["reference"]]
-                    for d in preview["datasets"]
-                ],
-            ),
-            table(
-                ["Input", "Available", "Missing", "Alignment losses"],
+                    item["role"],
+                    f"{item['instrument']['market']}:{item['instrument']['symbol']}",
+                    item["source"],
+                    item["vendor_field"],
+                    item["return_basis"],
+                    item["currency"],
+                    item["interval_count"],
+                ]
+                for item in preview["inputs"]
+            ],
+        ),
+        html.H4("Research sources and alignment"),
+        table(
+            ["Source", "Currency convention", "Observations", "Reference"],
+            [
+                [d["source"], d["currency"], d["observation_count"], d["reference"]]
+                for d in preview["datasets"]
+            ],
+        ),
+        table(
+            ["Input", "Available", "Missing", "Alignment losses"],
+            [
                 [
+                    c["role"],
+                    c["available_periods"],
+                    c["invalid_or_missing_periods"],
+                    c["alignment_losses"],
+                ]
+                for c in preview["coverage"]
+            ],
+        ),
+    ]
+    configured_mappings = preview.get("configured_mappings", [])
+    if configured_mappings:
+        drill_down.extend(
+            [
+                html.H4("Configured Bloomberg return mappings"),
+                table(
+                    ["Instrument", "Bloomberg security", "Field", "Currency", "Basis"],
                     [
-                        c["role"],
-                        c["available_periods"],
-                        c["invalid_or_missing_periods"],
-                        c["alignment_losses"],
-                    ]
-                    for c in preview["coverage"]
+                        [
+                            f"{item['instrument']['market']}:{item['instrument']['symbol']}",
+                            item["security"],
+                            item["field"],
+                            item["currency"],
+                            item["return_basis"],
+                        ]
+                        for item in configured_mappings
+                    ],
+                ),
+            ]
+        )
+    pack_inputs = preview.get("pack_inputs", {})
+    if pack_inputs:
+        drill_down.extend(
+            [
+                html.H4("Selected Bloomberg pack inputs"),
+                table(
+                    ["Input", "Bloomberg security", "Field", "Currency", "Unit", "Scale"],
+                    [
+                        [key, item["security"], item["field"], item["currency"], item["unit"], item["scale"]]
+                        for key, item in pack_inputs.items()
+                    ],
+                ),
+            ]
+        )
+    drill_down.extend(
+        [
+            html.H4("Exact aligned model rows"),
+            html.P(f"Showing the latest {min(len(rows), 120)} of {len(rows)} observations."),
+            table(
+                ["Start", "End", *(f"{c['label']} · {c['unit']}" for c in columns)],
+                [
+                    [row["start_date"], row["end_date"], *(f"{value:.8g}" for value in row["values"])]
+                    for row in rows[-120:]
                 ],
             ),
-            table(
-                ["Factor", "Unit", "Quotation currency"],
-                [[c["label"], c["unit"], c.get("currency") or "Study currency"] for c in columns],
-            ),
-            *(f"{value:.8g}" for value in row["values"]),
         ]
-        for row in rows[-120:]
-    ]
+    )
     return html.Div(
         [
             html.H3("Aligned model inputs"),
             html.P(
-                "This is an in-memory view of the exact returns or changes supplied to the "
-                "regression after frequency conversion, FX conversion and date alignment. The "
-                "chart is standardized only for visual comparison; the table retains model units. "
-                "Licensed vendor payloads are neither logged nor stored in the report."
-            ),
-            table(
-                [
-                    "Role",
-                    "Instrument",
-                    "Source",
-                    "Vendor field",
-                    "Return basis",
-                    "Currency",
-                    "Intervals",
-                ],
-                metadata,
-            ),
-            *(
-                [
-                    html.H4("Configured Bloomberg return mappings"),
-                    table(
-                        ["Instrument", "Bloomberg security", "Field", "Currency", "Basis"],
-                        configured_mappings,
-                    ),
-                ]
-                if configured_mappings
-                else []
-            ),
-            *(
-                [
-                    html.H4("Selected Bloomberg pack inputs"),
-                    table(
-                        ["Input", "Bloomberg security", "Field", "Currency", "Unit", "Scale"],
-                        pack_mappings,
-                    ),
-                ]
-                if pack_mappings
-                else []
+                f"{len(rows)} shared observations from {rows[0]['start_date']} to "
+                f"{rows[-1]['end_date']}. Hover to inspect the exact model value, unit and "
+                "currency for every series on the same date. Lines are standardized only so "
+                "differently scaled inputs can be compared on one chart."
             ),
             graph(figure),
-            html.P(f"Showing the latest {min(len(rows), 120)} of {len(rows)} aligned rows."),
-            table(
-                ["Start", "End", *(f"{c['label']} · {c['unit']}" for c in columns)],
-                raw_rows,
-            ),
+            html.Details(drill_down),
         ]
     )
 
@@ -1070,18 +1091,19 @@ def render_result(report, source):
         return html.P(
             "Provider could not complete this study. Check configuration and entitlements."
         )
-    notices = [html.Li(WARNINGS.get(w, w.replace("_", " "))) for w in p["diagnostics"]]
     details = [
-        html.H2("Study results"),
+        html.H2("Single-stock factor view"),
         html.P(
-            f"{p['frequency']} · {p['study_currency']} · {p['sample_count']} observations · "
+            f"{p['frequency']} · {p['study_currency']} · {p['sample_count']} aligned observations · "
             f"{p['return_mode'].replace('_', ' ')}"
         ),
-        html.Ul(notices),
     ]
     if source == "demo":
         details.append(
-            html.P("Synthetic data for learning only; these are not historical market results.")
+            html.P(
+                "Synthetic data for learning only; these are not historical market results.",
+                className="result-note",
+            )
         )
     if p.get("error_code"):
         details.append(
@@ -1089,172 +1111,62 @@ def render_result(report, source):
                 f"Stage: {p['error_stage']} · Code: {p['error_code']} · Reference: {p['error_id']}"
             )
         )
-    if p.get("coverage"):
-        details.extend(
-            [
-                html.H3("Data coverage"),
-                table(
-                    [
-                        "Input",
-                        "Expected",
-                        "Available",
-                        "Missing/invalid",
-                        "FX losses",
-                        "Alignment losses",
-                    ],
-                    [
-                        [
-                            c[k]
-                            for k in (
-                                "role",
-                                "expected_periods",
-                                "available_periods",
-                                "invalid_or_missing_periods",
-                                "fx_endpoint_losses",
-                                "alignment_losses",
-                            )
-                        ]
-                        for c in p["coverage"]
-                    ],
-                ),
-            ]
-        )
     coefficients = p.get("coefficients", [])
     if not coefficients:
         details.append(
             html.P("No fit is shown. Review coverage, factor definitions and minimum observations.")
         )
-        return html.Div(details)
-    details.append(
-        html.P(
-            "Attribution: "
-            + p["attribution_mode"]
-            + (" · " + " → ".join(p["sequential_order"]) if p["sequential_order"] else "")
-        )
-    )
-    details.append(
-        html.Details(
-            [
-                html.Summary("Correlation and collinearity checks · review first"),
-                *render_relationships(p),
-            ],
-            open=True,
-        )
-    )
-    details.append(
-        html.P(
-            f"R²: {p['r_squared']:.1%} · Adjusted R²: {p['adjusted_r_squared']:.1%} · "
-            f"HAC joint F: {_number(p['joint_factor_f_statistic'])} "
-            f"(p={_p_value(p['joint_factor_p_value'])}) · "
-            f"Covariance: {p['covariance']} · Selected-basis condition: {p['condition_number']:.2f}"
-        )
-    )
-    details.append(
-        html.P(
-            "Coefficients describe historical co-movement, not causality or predicted returns. "
-            "A funded benchmark becomes an excess return when cash is subtracted; spreads do not."
-        )
-    )
-    details.append(
-        table(
-            ["Factor", "Coefficient", "Standardized beta", "95% interval", "Input unit"],
-            [
-                [
-                    c["label"],
-                    f"{c['estimate']:.5f}",
-                    _number(c["standardized_effect"]),
-                    "Withheld: irregular dates"
-                    if c["lower_95"] is None
-                    else f"[{c['lower_95']:.5f}, {c['upper_95']:.5f}]",
-                    c["unit"],
-                ]
-                for c in coefficients
-            ],
-        )
-    )
-    diagnostic = p.get("residual_diagnostics")
-    if diagnostic:
-        details.append(
-            html.Details(
-                [
-                    html.Summary("Residual diagnostics · autocorrelation, tails and volatility"),
-                    html.P(
-                        "Small p-values flag assumptions for review; they do not select factors. "
-                        "Jarque–Bera describes tail/shape departures. HAC intervals are asymptotic "
-                        "and do not require exactly normal residuals. Lag-based tests are withheld "
-                        "when retained dates are irregular."
-                    ),
-                    table(
-                        ["Test", "Statistic", "p-value", "Lag"],
-                        [
-                            ["Durbin–Watson", _number(diagnostic["durbin_watson"]), "—", 1],
-                            [
-                                "Ljung–Box",
-                                _number(diagnostic["ljung_box_statistic"]),
-                                _p_value(diagnostic["ljung_box_p_value"]),
-                                diagnostic["lag"],
-                            ],
-                            [
-                                "Jarque–Bera",
-                                _number(diagnostic["jarque_bera_statistic"]),
-                                _p_value(diagnostic["jarque_bera_p_value"]),
-                                "—",
-                            ],
-                            [
-                                "ARCH LM",
-                                _number(diagnostic["arch_lm_statistic"]),
-                                _p_value(diagnostic["arch_lm_p_value"]),
-                                diagnostic["lag"],
-                            ],
-                        ],
-                    ),
-                ]
+        if p.get("coverage"):
+            details.append(
+                html.Details(
+                    [html.Summary("Data coverage"), coverage_table(p["coverage"])],
+                    open=True,
+                )
             )
-        )
-    scenario_coefficients = scenario_inputs(p)
-    details.append(
-        html.Details(
-            [
-                html.Summary("Factor-move scenario · original economic factors"),
-                html.P(
-                    "Enter each hypothetical move in the factor's stated input unit: 0.01 means "
-                    "1% for decimal-return factors, while price-change factors use their declared "
-                    "price unit. Contributions use the original joint-model beta, even when the "
-                    "attribution view is orthogonalized. This is a linear sensitivity, not a "
-                    "forecast; the intercept and residual are excluded."
-                ),
-                html.Div(
-                    [
-                        html.Div(
-                            [
-                                html.Label(f"{coefficient['label']} · {coefficient['unit']}"),
-                                dcc.Input(
-                                    id={
-                                        "type": "factor-scenario-move",
-                                        "term": coefficient["term"],
-                                        "label": coefficient["label"],
-                                        "beta": coefficient["beta"],
-                                    },
-                                    type="number",
-                                    value=0,
-                                    step="any",
-                                    debounce=True,
-                                ),
-                            ],
-                            className="field",
-                        )
-                        for coefficient in scenario_coefficients
-                    ],
-                    className="scenario-grid",
-                ),
-                html.Div(id="scenario-output"),
-            ]
-        )
+        return html.Div(details)
+    factor_coefficients = coefficients[1:]
+    dominant = max(factor_coefficients, key=lambda c: abs(c["standardized_effect"]))
+    model_p = p["joint_factor_p_value"]
+    model_signal = "Significant" if model_p is not None and model_p < 0.05 else "Review"
+    review_count = len(p["diagnostics"])
+    details.extend(
+        [
+            html.H3("At a glance"),
+            html.Div(
+                [
+                    html.Div(
+                        [html.Span("Explained variation"), html.Strong(f"{p['adjusted_r_squared']:.1%}"), html.Small("Adjusted R²")],
+                        className="metric-card",
+                    ),
+                    html.Div(
+                        [html.Span("Strongest exposure"), html.Strong(dominant["label"]), html.Small(f"Standardized beta {_number(dominant['standardized_effect'])}")],
+                        className="metric-card",
+                    ),
+                    html.Div(
+                        [html.Span("Joint model"), html.Strong(model_signal), html.Small(f"p = {_p_value(model_p)}")],
+                        className="metric-card",
+                    ),
+                    html.Div(
+                        [html.Span("Review flags"), html.Strong(str(review_count)), html.Small("Open diagnostics below")],
+                        className="metric-card",
+                    ),
+                ],
+                className="metric-grid",
+            ),
+            html.P(
+                f"The model explains {p['adjusted_r_squared']:.0%} of historical return variation "
+                f"after allowing for model size. {dominant['label']} has the largest exposure on "
+                "a comparable standardized basis. Treat this as historical co-movement, not "
+                "causality or a return forecast.",
+                className="key-message",
+            ),
+        ]
     )
+    scenario_coefficients = scenario_inputs(p)
     chart = go.Figure(
         go.Bar(
-            x=[c["label"] for c in coefficients[1:]],
-            y=[c["standardized_effect"] for c in coefficients[1:]],
+            x=[c["label"] for c in factor_coefficients],
+            y=[c["standardized_effect"] for c in factor_coefficients],
         )
     )
     finish_figure(
@@ -1262,7 +1174,16 @@ def render_result(report, source):
         "Standardized effects (comparable across units)",
         yaxis_title="Standardized coefficient",
     )
-    details.append(graph(chart))
+    details.extend(
+        [
+            html.H3("What drives the stock?"),
+            html.P(
+                "Positive bars move with the stock; negative bars move against it. Standardizing "
+                "puts returns and price-change factors on a comparable scale."
+            ),
+            graph(chart),
+        ]
+    )
     if p.get("rolling"):
         rolling = go.Figure()
         by_date = {v["end_date"]: v for v in p["rolling"]}
@@ -1275,9 +1196,87 @@ def render_result(report, source):
                 name=c["label"],
             )
         finish_figure(rolling, "Rolling exposures (original units)", yaxis_title="Coefficient")
-        details.append(graph(rolling))
-    if p.get("comparisons"):
         details.extend(
+            [
+                html.H3("Have the exposures been stable?"),
+                html.P(
+                    "A stable line supports a persistent relationship. Large swings or sign "
+                    "changes suggest the full-sample beta hides different regimes."
+                ),
+                graph(rolling),
+            ]
+        )
+
+    diagnostic = p.get("residual_diagnostics")
+    technical = [
+        html.P(
+            "Use this section to challenge the headline result. It contains data coverage, "
+            "correlation, regression assumptions, alternative models and attribution details."
+        ),
+        html.H3("Review flags"),
+        html.Ul(
+            [html.Li(WARNINGS.get(w, w.replace("_", " "))) for w in p["diagnostics"]]
+        )
+        if p["diagnostics"]
+        else html.P("No automated diagnostic warning was raised."),
+    ]
+    if p.get("coverage"):
+        technical.extend(
+            [
+                html.H3("Data coverage"),
+                coverage_table(p["coverage"]),
+            ]
+        )
+    technical.extend(
+        [
+            html.Details(
+                [html.Summary("Correlation and collinearity checks"), *render_relationships(p)]
+            ),
+            html.H3("Exposure estimates"),
+            html.P(
+                f"R² {p['r_squared']:.1%} · adjusted R² {p['adjusted_r_squared']:.1%} · "
+                f"HAC joint F {_number(p['joint_factor_f_statistic'])} "
+                f"(p={_p_value(model_p)}) · covariance {p['covariance']} · "
+                f"condition number {p['condition_number']:.2f}. Attribution: "
+                + p["attribution_mode"]
+                + (" · " + " → ".join(p["sequential_order"]) if p["sequential_order"] else "")
+            ),
+            table(
+                ["Factor", "Coefficient", "Standardized beta", "95% interval", "Input unit"],
+                [
+                    [
+                        c["label"],
+                        f"{c['estimate']:.5f}",
+                        _number(c["standardized_effect"]),
+                        "Withheld: irregular dates" if c["lower_95"] is None else f"[{c['lower_95']:.5f}, {c['upper_95']:.5f}]",
+                        c["unit"],
+                    ]
+                    for c in coefficients
+                ],
+            ),
+        ]
+    )
+    if diagnostic:
+        technical.extend(
+            [
+                html.H3("Residual diagnostics"),
+                html.P(
+                    "Small p-values flag assumptions for review. Lag-based tests are withheld "
+                    "when retained dates are irregular."
+                ),
+                table(
+                    ["Test", "Statistic", "p-value", "Lag"],
+                    [
+                        ["Durbin–Watson", _number(diagnostic["durbin_watson"]), "—", 1],
+                        ["Ljung–Box", _number(diagnostic["ljung_box_statistic"]), _p_value(diagnostic["ljung_box_p_value"]), diagnostic["lag"]],
+                        ["Jarque–Bera", _number(diagnostic["jarque_bera_statistic"]), _p_value(diagnostic["jarque_bera_p_value"]), "—"],
+                        ["ARCH LM", _number(diagnostic["arch_lm_statistic"]), _p_value(diagnostic["arch_lm_p_value"]), diagnostic["lag"]],
+                    ],
+                ),
+            ]
+        )
+    if p.get("comparisons"):
+        technical.extend(
             [
                 html.H3("Model comparison"),
                 html.P(
@@ -1330,7 +1329,7 @@ def render_result(report, source):
             ]
         )
     if p.get("residualizations"):
-        details.extend(
+        technical.extend(
             [
                 html.H3("Remaining variation"),
                 html.P(
@@ -1352,8 +1351,8 @@ def render_result(report, source):
                 ),
             ]
         )
-    details.append(html.H3("Rolling stability"))
-    details.append(
+    technical.append(html.H3("Rolling stability"))
+    technical.append(
         html.P(
             f"Rolling window: {p['rolling_window']} observations; "
             f"successful fits: {len(p['rolling'])}; "
@@ -1361,10 +1360,10 @@ def render_result(report, source):
         )
     )
     if p["rolling_skipped_end_dates"]:
-        details.append(
+        technical.append(
             html.P("Unavailable window end dates: " + ", ".join(p["rolling_skipped_end_dates"]))
         )
-    details.append(
+    technical.append(
         html.P(
             "Ranges and sign shares describe overlapping rolling windows, not confidence intervals "
             "or independent statistical tests. "
@@ -1374,7 +1373,7 @@ def render_result(report, source):
         )
     )
     if p.get("stability"):
-        details.append(
+        technical.append(
             table(
                 [
                     "Factor",
@@ -1404,16 +1403,55 @@ def render_result(report, source):
             )
         )
     else:
-        details.append(
+        technical.append(
             html.P("No valid rolling fits. Extend history or adjust the rolling window.")
         )
-    details.append(
+    technical.append(
         html.Details(
             [
                 html.Summary("Full diagnostics and metadata"),
                 html.Pre(json.dumps(p, indent=2), style={"overflowX": "auto"}),
             ]
         )
+    )
+    details.extend(
+        [
+            html.Details(
+                [
+                    html.Summary("Test a factor scenario"),
+                    html.H3("Factor-move scenario · original economic factors"),
+                    html.P(
+                        "Enter moves in each factor's stated unit. Contributions use the original "
+                        "joint-model beta and exclude the intercept and residual. This is a linear "
+                        "sensitivity, not a forecast."
+                    ),
+                    html.Div(
+                        [
+                            html.Div(
+                                [
+                                    html.Label(f"{coefficient['label']} · {coefficient['unit']}"),
+                                    dcc.Input(
+                                        id={"type": "factor-scenario-move", "term": coefficient["term"], "label": coefficient["label"], "beta": coefficient["beta"]},
+                                        type="number",
+                                        value=0,
+                                        step="any",
+                                        debounce=True,
+                                    ),
+                                ],
+                                className="field",
+                            )
+                            for coefficient in scenario_coefficients
+                        ],
+                        className="scenario-grid",
+                    ),
+                    html.Div(id="scenario-output"),
+                ]
+            ),
+            html.Details(
+                [html.Summary("Technical diagnostics"), *technical],
+                className="technical-diagnostics",
+            ),
+        ]
     )
     return html.Div(details)
 

@@ -269,7 +269,43 @@ def test_data_preview_uses_the_same_aligned_model_inputs():
     assert len(preview["rows"]) >= 60
     rendered = str(render_preview(preview))
     assert "Aligned model inputs" in rendered
+    assert "Hover to inspect the exact model value" in rendered
+    assert "Input definitions and exact rows" in rendered
     assert "Vendor field" in rendered
+    assert "Research sources and alignment" in rendered
+
+
+def test_data_preview_keeps_tables_behind_one_closed_drill_down():
+    component = render_preview(run_preview("demo", *controls()))
+    children = component.to_plotly_json()["props"]["children"]
+
+    assert [child.to_plotly_json()["type"] for child in children] == [
+        "H3",
+        "P",
+        "Graph",
+        "Details",
+    ]
+    assert children[-1].to_plotly_json()["props"].get("open") is not True
+
+
+def test_single_stock_result_starts_with_plain_language_summary():
+    report = run_study("demo", *controls())
+    rendered = str(render_result(report, "demo"))
+
+    assert "At a glance" in rendered
+    assert "What drives the stock?" in rendered
+    assert "Technical diagnostics" in rendered
+    assert "Correlation and collinearity checks" in rendered
+
+
+def test_failed_fit_still_exposes_data_coverage():
+    report = run_study("demo", *controls())
+    report["results"][0]["presentation"]["coefficients"] = []
+
+    rendered = str(render_result(report, "demo"))
+
+    assert "Data coverage" in rendered
+    assert "Missing/invalid" in rendered
 
 
 def test_combined_matrix_includes_stock_and_collinearity_recommendation():

@@ -81,6 +81,14 @@ header p, .workspace-header p { margin: 0; color: var(--muted); }
 .results-panel p { color: var(--muted); font-size: 12px; }
 .results-panel ul { padding: 13px 15px 13px 34px; border: 1px solid #ead9aa; border-radius: 8px; background: var(--warning-bg); color: var(--warning-ink); }
 .results-panel li { margin: 6px 0; font-size: 11px; }
+.result-note { padding: 9px 11px; border-left: 3px solid var(--brand); background: var(--brand-soft); }
+.metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 12px 0 18px; }
+.metric-card { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
+.metric-card span, .metric-card small { display: block; color: var(--muted); font-size: 9px; }
+.metric-card span { font-weight: 750; letter-spacing: 0.45px; text-transform: uppercase; }
+.metric-card strong { display: block; overflow: hidden; margin: 5px 0 2px; color: var(--navy); font-family: Georgia, serif; font-size: 22px; font-weight: 400; line-height: 1.15; text-overflow: ellipsis; white-space: nowrap; }
+.key-message { max-width: 850px; padding: 13px 15px; border-radius: 8px; background: var(--brand-soft); color: #365d51 !important; }
+.technical-diagnostics { margin-top: 14px !important; padding: 14px 16px !important; border: 1px solid var(--line) !important; border-radius: 9px; }
 .table-scroll { overflow-x: auto; }
 table { width: 100%; margin: 13px 0 20px; border-collapse: collapse; font-size: 11px; }
 th { color: var(--muted); text-align: left; text-transform: uppercase; font-size: 9px; font-weight: 750; letter-spacing: 0.45px; }
@@ -115,10 +123,12 @@ footer { margin-top: 25px; color: var(--muted); font-size: 10px; letter-spacing:
   .steps > div { display: grid; grid-template-columns: 38px 1fr; column-gap: 8px; }
   .steps h3 { margin: 3px 0; }
   .steps p { grid-column: 2; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 440px) {
   header p { display: none; }
   .two-column-fields { grid-template-columns: 1fr; gap: 0; }
   .workspace-header h2 { font-size: 26px; }
+  .metric-grid { grid-template-columns: 1fr; }
 }
