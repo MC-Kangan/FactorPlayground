@@ -13,6 +13,7 @@ from app import (
     data_source_guidance,
     describe_pack,
     graph,
+    help_text,
     render_cross_section_result,
     render_preview,
     render_result,
@@ -22,6 +23,7 @@ from app import (
     scenario_impact,
     scenario_inputs,
     select_preset,
+    settings_section,
     study_context,
     update_result,
 )
@@ -104,6 +106,36 @@ def test_dash_layout():
     assert "Cross-sectional signals" in layout
     assert '"result"' in layout
     assert '"cs-result"' in layout
+
+
+def test_sidebar_guidance_is_available_on_hover_without_visible_paragraphs():
+    tip = help_text("Detailed guidance")
+    props = tip.to_plotly_json()["props"]
+
+    assert props["children"] == "ⓘ"
+    assert props["title"] == "Detailed guidance"
+    assert props["tabIndex"] == 0
+    assert props["aria-label"] == "Detailed guidance"
+
+    section = settings_section("Core", "Section guidance", [], open_by_default=True)
+    children = section.to_plotly_json()["props"]["children"]
+    assert [child.to_plotly_json()["type"] for child in children] == ["Summary", "Div"]
+    summary = children[0].to_plotly_json()["props"]["children"]
+    assert summary[1].to_plotly_json()["props"]["title"] == "Section guidance"
+
+
+def test_dynamic_sidebar_guidance_updates_tooltip_text():
+    callback_outputs = set(app.callback_map)
+
+    assert any(
+        "source-guidance.title" in output and "source-guidance.aria-label" in output
+        for output in callback_outputs
+    )
+    assert any(
+        "cs-source-guidance.title" in output and "cs-source-guidance.aria-label" in output
+        for output in callback_outputs
+    )
+    assert "pack-summary.children" in callback_outputs
 
 
 def test_analysis_callbacks_run_only_from_explicit_buttons():

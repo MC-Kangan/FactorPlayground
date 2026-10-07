@@ -1460,8 +1460,16 @@ def field(label, control):
     return html.Div([html.Label(label), control], className="field")
 
 
-def help_text(text):
-    return html.P(text, className="help-text")
+def help_text(text, *, id=None, warning=False):
+    identity = {"id": id} if id is not None else {}
+    return html.Span(
+        "⚠" if warning else "ⓘ",
+        title=text,
+        tabIndex=0,
+        className="help-tip help-tip--warning" if warning else "help-tip",
+        **identity,
+        **{"aria-label": text},
+    )
 
 
 def settings_section(title, description, children, *, open_by_default=False):
@@ -1470,10 +1478,14 @@ def settings_section(title, description, children, *, open_by_default=False):
             html.Summary(
                 [
                     html.Span(title),
-                    html.Small("Hide" if open_by_default else "Show"),
+                    html.Span(
+                        "ⓘ",
+                        title=description,
+                        className="section-info",
+                        **{"aria-label": description},
+                    ),
                 ]
             ),
-            html.P(description, className="section-description"),
             html.Div(children, className="settings-section-body"),
         ],
         open=open_by_default,
@@ -1578,10 +1590,9 @@ def single_stock_workspace():
                             clearable=False,
                         ),
                     ),
-                    html.P(
+                    help_text(
                         data_source_guidance(DEFAULT_SOURCE),
                         id="source-guidance",
-                        className="source-guidance",
                     ),
                     field(
                         "Bloomberg equity identifier",
@@ -1606,7 +1617,13 @@ def single_stock_workspace():
                             clearable=False,
                         ),
                     ),
-                    html.Div(id="pack-summary", className="help-text"),
+                    html.Div(
+                        help_text(
+                            "Hover for the selected factor-pack definitions and sources."
+                        ),
+                        id="pack-summary",
+                        className="help-slot",
+                    ),
                     field(
                         "Select factors from these packs",
                         dcc.Dropdown(searchable=False, id="selected", multi=True),
@@ -1803,7 +1820,10 @@ def single_stock_workspace():
                 ],
             ),
             html.Button("Run single-stock analysis", id="run", n_clicks=0, className="primary"),
-            html.P("Results refresh only when you run the study.", className="run-note"),
+            html.Div(
+                help_text("Results refresh only when you run the study."),
+                className="run-help",
+            ),
         ],
         className="control-panel",
     )
@@ -1889,10 +1909,9 @@ def cross_section_workspace():
                             clearable=False,
                         ),
                     ),
-                    html.P(
+                    help_text(
                         data_source_guidance("demo"),
                         id="cs-source-guidance",
-                        className="source-guidance",
                     ),
                     field(
                         "Universe editor",
@@ -2014,7 +2033,10 @@ def cross_section_workspace():
                 n_clicks=0,
                 className="primary",
             ),
-            html.P("Results refresh only when you run the study.", className="run-note"),
+            html.Div(
+                help_text("Results refresh only when you run the study."),
+                className="run-help",
+            ),
         ],
         className="control-panel",
     )
@@ -2199,72 +2221,67 @@ def show_order(order):
     return " → ".join(f"{i + 1}. {key}" for i, key in enumerate(order or []))
 
 
-@app.callback(Output("source-guidance", "children"), Input("source", "value"))
+@app.callback(
+    Output("source-guidance", "title"),
+    Output("source-guidance", "aria-label"),
+    Input("source", "value"),
+)
 def explain_source(source):
-    return data_source_guidance(source)
+    guidance = data_source_guidance(source)
+    return guidance, guidance
 
 
-@app.callback(Output("cs-source-guidance", "children"), Input("cs-source", "value"))
+@app.callback(
+    Output("cs-source-guidance", "title"),
+    Output("cs-source-guidance", "aria-label"),
+    Input("cs-source", "value"),
+)
 def explain_cross_section_source(source):
     guidance = data_source_guidance(source)
     if source == "yahoo":
-        return guidance.replace(
+        guidance = guidance.replace(
             " The Fama–French preset separately downloads official research files.", ""
         )
-    return guidance
+    return guidance, guidance
 
 
 @app.callback(Output("pack-summary", "children"), Input("preset", "value"))
 def describe_pack(presets):
     if not presets:
-        return "Choose one or more factor packs."
+        return help_text("Choose one or more factor packs.", warning=True)
     try:
         available_factors(presets)
     except ValueError as error:
-        return html.P(str(error), className="source-guidance")
+        return help_text(str(error), warning=True)
     packs = packs_for(presets)
     if not packs:
-        return "YAML packs are loaded from the local factor_packs folder at startup."
+        return help_text("YAML packs are loaded from the local factor_packs folder at startup.")
     items = []
     for pack in packs:
-        items.extend(
-            [
-                html.H4(pack.label.replace("\\xB7", "·")),
-                html.P(pack.description),
-                html.P("Sources: " + ", ".join(pack.sources)),
-            ]
+        items.append(
+            f"{pack.label.replace('\\xB7', '·')}. {pack.description} "
+            f"Sources: {', '.join(pack.sources)}."
         )
         if pack.level_factors:
-            items.append(html.P(f"Pack currency: {pack.currency} · Calendar: {pack.calendar}"))
-            items.append(
-                html.Ul(
-                    [
-                        html.Li(
-                            f"{key}: {item.security} · {item.field} · "
-                            f"{item.currency} · {item.unit} · scale {item.scale:g}"
-                        )
-                        for key, item in pack.inputs.items()
-                    ]
-                )
+            items.append(f"Pack currency: {pack.currency}; calendar: {pack.calendar}.")
+            items.extend(
+                f"{key}: {item.security}; {item.field}; {item.currency}; "
+                f"{item.unit}; scale {item.scale:g}."
+                for key, item in pack.inputs.items()
             )
-            items.append(
-                html.Ul(
-                    [
-                        html.Li(
-                            f"{f.label}: {f.transform} of "
-                            + " + ".join(f"{weight:g} × {key}" for key, weight in f.legs.items())
-                        )
-                        for f in pack.level_factors
-                    ]
+            items.extend(
+                f"{factor.label}: {factor.transform} of "
+                + " + ".join(
+                    f"{weight:g} × {key}" for key, weight in factor.legs.items()
                 )
+                + "."
+                for factor in pack.level_factors
             )
     items.append(
-        html.P(
-            "The stock remains in simple adjusted returns. Factor transformations apply at "
-            "the selected frequency. Bloomberg identifiers and units must be verified locally."
-        )
+        "The stock remains in simple adjusted returns. Factor transformations apply at "
+        "the selected frequency. Bloomberg identifiers and units must be verified locally."
     )
-    return items
+    return help_text("\n".join(items))
 
 
 @app.callback(
