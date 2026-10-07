@@ -44,7 +44,7 @@ level_factors:
   legs:
     growth: 1
   transform: simple_return
-- id: momentum
+- id: msci_momentum
   label: MSCI momentum
   legs:
     momentum: 1

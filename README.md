@@ -80,12 +80,14 @@ For Bloomberg mappings, units, currencies and BPIPE limitations, follow the
    into expandable sections.
 2. When `TRADE_RESEARCH_CONFIG` selects Bloomberg, the configured Bloomberg source is
    selected by default. Otherwise start with Synthetic demo for an offline UI check.
-3. Enter a stock such as US:AAPL or XETRA:SAP.
+3. Enter the Bloomberg equity identifier, such as `AAPL US Equity`, `REP SM Equity`
+   or `SAP GY Equity`. The app translates the exchange code for Yahoo when Bloomberg
+   is unavailable and keeps the exact identifier for Bloomberg.
 4. Select one or more factor packs, for example MSCI plus Energy. Then remove any
    individual factors you do not want in this run.
 5. Add as many extra benchmarks as the sample can support, one per line:
-   `Pharma | US:IHE`
-   or `Growth minus value | US:IWF | US:IWD`.
+   `Pharma | IHE US Equity`
+   or `Growth minus value | IWF US Equity | IWD US Equity`.
    French selections subtract cash from funded asset benchmarks once.
 6. Choose daily/monthly, research region, dates, observation minimum, rolling
    observations and HAC lags. Then click Run.
@@ -135,7 +137,7 @@ the demo supports the French research catalog only.
 
 Synthetic data remains the safe default only when Bloomberg is not configured, so the app
 can open without market-data credentials. It is never mixed into a Yahoo or configured-provider result. For a public
-Repsol example, choose **Yahoo + French**, enter `BME:REP`, select the French preset and
+Repsol example, choose **Yahoo + French**, enter `REP SM Equity`, select the French preset and
 Europe, then choose daily or monthly frequency. The adapter resolves that canonical ID to
 Yahoo's `REP.MC`; the French adapter downloads the corresponding native-frequency files
 from the official Kenneth French library when the study runs.
@@ -147,6 +149,12 @@ licensed MSCI series. The energy YAML pack for Yahoo uses USO, BNO, UNG and UGA 
 tradable ETP return proxies, whose returns include product structure, collateral, fees and
 futures roll effects. It does not claim to represent spot crude, spot gas or diesel. The Bloomberg YAML templates provide editable price-series mappings and transforms;
 replace placeholders with verified entitled securities before enabling them.
+
+The stock-entry translator supports Bloomberg U.S. composite/venue codes (`US`, `UA`,
+`UN`, `UQ`, `UW`) and the major European codes `LN`, `GY`, `SM`, `IM`, `SW`, `FP`,
+`NA`, `BB`, `PL`, `DC`, `FH`, `ID`, `NO`, `SS` and `AV`. Unsupported codes fail
+instead of being assigned a guessed Yahoo market. Some share-class roots differ between
+vendors; verify the resolved series in **Data inspector** before using it.
 
 See ../TradeAgent/docs/factor-mvp2-implementation.md for provider contracts, cash
 semantics, native monthly inputs, coverage and assumptions. Custom providers can be
@@ -236,16 +244,16 @@ VIF and collinearity flags remain visible alongside residualized results.
 Enter one stock per line:
 
 ```text
-US:XOM | Energy | US
-US:CVX | Energy | US
-US:LLY | Health Care | US
+XOM US Equity | Energy | US
+CVX US Equity | Energy | US
+LLY US Equity | Health Care | US
 ```
 
 Point-in-time mode adds membership dates:
 
 ```text
-US:XOM | Energy | US | 2015-01-01 |
-US:OLDCO | Energy | US | 2015-01-01 | 2021-06-30
+XOM US Equity | Energy | US | 2015-01-01 |
+OLDCO US Equity | Energy | US | 2015-01-01 | 2021-06-30
 ```
 
 The controls select current-watchlist or point-in-time membership, whole-universe or
@@ -303,3 +311,59 @@ local configuration; no raw licensed observations or credentials belong in them.
 - **Old layout or growing plots:** stop older app processes, restart from the current
   checkout and refresh the browser. Charts have bounded heights in the current CSS.
 - **Stale results:** changing inputs intentionally clears results; click Run again.
+
+
+## Fama–French plus Bloomberg factors
+
+With **Configured providers · Bloomberg**, select **Fama–French** and an enabled
+Bloomberg energy or MSCI YAML pack together, then deselect unwanted factors. The
+backend combines the selected columns before estimation and the data inspector uses
+the identical alignment pipeline.
+
+French models default to USD stock excess returns. Local stock returns are converted
+using Bloomberg FX before the French cash return is subtracted. Bloomberg YAML price
+changes retain their declared units and quotation currency; they are explanatory
+variables rather than automatically converted funded investments. Daily data must
+match both the start and end of each return period; monthly data must represent complete
+months. Gaps are dropped, never filled. Review **Research sources and alignment** in
+the inspector and **Data coverage** in the results for the source-specific losses.
+
+French files still require web access to the official Kenneth French library. Pack-only
+studies do not fetch French files. See the backend
+[composition guide](../TradeAgent/docs/factor-panel-composition.md) for details.
+
+
+## Watchlist attribution
+
+Use the **Watchlist attribution** tab for up to 20 Bloomberg equity identifiers,
+one per line. Select a source, one or more enabled factor packs, individual factors,
+research region, training start, minimum sample and HAC lags. Click **Refresh data
+and refit**. Optional 5-minute, 15-minute or hourly refresh runs only while this tab
+is active. Every refresh uses the settings currently shown and rebuilds the snapshot;
+failed stocks show an unavailable status instead of keeping old numbers.
+
+This first version monitors completed daily observations, not streaming intraday
+prices. It excludes the current UTC date. The latest fully aligned day is held out
+of estimation. Betas are fitted using the preceding history and the same normalized
+factor definitions used for that day’s attribution. Every refresh refits; there is no
+persistent model cache and no additional dependency. The browser holds only an
+in-memory snapshot. Use the source configuration and entitlements documented above.
+
+Read **As of** before comparing rows: French publication delays and missing vendor
+observations can make the aligned date older. `Lagged data` means the row does not
+reach the last expected stock session. Synthetic data is explicitly labelled Demo.
+Contributions and the intercept are shown in basis points (100 bp = 1%). Actual
+may mean an excess return in the study currency, not the stock’s local price move.
+Explained equals the intercept plus factor contributions; unexplained is actual
+minus explained. Missing values are blank, never zero.
+
+Select a row for its contribution chart, exact transformed factor moves, betas and
+model warnings. Adjusted R² and VIF describe the training sample, not daily prediction
+accuracy. Strong collinearity can make individual contributions unstable. This tab
+uses the original factor basis; use single-stock diagnostics for controlled or
+sequential residualization. Do not apply transformed betas to raw factor moves.
+
+This is a contemporaneous model estimate, not causal attribution or a point-in-time
+backtest. Revised input history, asynchronous closing times and omitted drivers can
+all affect the unexplained return. No ETF proxy is substituted for a French factor.
+The MSCI YAML template uses `msci_momentum` so it can coexist with French `momentum`.

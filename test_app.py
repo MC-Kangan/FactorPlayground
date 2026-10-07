@@ -22,6 +22,7 @@ from app import (
     scenario_impact,
     scenario_inputs,
     select_preset,
+    study_context,
     update_result,
 )
 
@@ -29,7 +30,7 @@ from app import (
 def controls(preset="french", frequency="monthly", extra="", advanced=""):
     presets = [preset] if isinstance(preset, str) else preset
     return (
-        "US:AAPL",
+        "AAPL US Equity",
         presets,
         select_preset(presets)[1],
         extra,
@@ -60,7 +61,7 @@ def test_demo_end_to_end(preset, frequency):
 
 
 def test_multiple_extra_factors_and_subset():
-    args = list(controls(extra="Pharma | US:IHE\nEnergy | US:XLE"))
+    args = list(controls(extra="Pharma | IHE US Equity\nEnergy | XLE US Equity"))
     args[2] = ["market_excess", "hml"]
     report = run_study("demo", *args)
     assert len(report["results"][0]["presentation"]["coefficients"]) == 5
@@ -186,6 +187,9 @@ def test_yaml_pack_is_directly_selectable_in_main_factor_controls():
     assert "Select factors from these packs" in layout
     assert "Model comparisons only · does not add factors" in layout
     assert "Choose the data source, stock and factor pack in Core setup" in layout
+    assert "AAPL US Equity" in layout
+    assert "Bloomberg equity identifier" in layout
+    assert "MARKET:SYMBOL" not in layout
 
 
 def test_all_dropdowns_are_non_searchable():
@@ -240,6 +244,23 @@ def test_bloomberg_becomes_default_candidate_when_environment_configures_it(monk
     assert bloomberg_is_configured()
 
 
+def test_bloomberg_stock_identifier_builds_exact_configured_mapping(monkeypatch):
+    monkeypatch.setenv("TRADE_RESEARCH_PRICE_PROVIDER", "bloomberg")
+    args = list(controls(extra="Pharma | IHE US Equity"))
+    args[0] = "REP SM Equity"
+
+    request, settings = study_context("configured", *args)
+
+    assert request.instrument.market == "BME"
+    assert request.instrument.symbol == "REP"
+    mapping = next(item for item in settings.bloomberg_return_mappings if item.instrument == request.instrument)
+    assert mapping.security == "REP SM Equity"
+    assert mapping.field == "PX_LAST"
+    assert mapping.currency == "EUR"
+    assert mapping.return_basis == "adjusted_close_return"
+    assert any(item.security == "IHE US Equity" for item in settings.bloomberg_return_mappings)
+
+
 def test_data_preview_uses_the_same_aligned_model_inputs():
     preview = run_preview("demo", *controls())
 
@@ -282,11 +303,11 @@ def test_combined_matrix_includes_stock_and_collinearity_recommendation():
 
 def test_cross_section_demo_and_rendering():
     universe = (
-        "US:XOM | Energy | US\nUS:CVX | Energy | US\nUS:COP | Energy | US\n"
-        "US:SLB | Energy | US\nUS:EOG | Energy | US\n"
-        "US:LLY | Health Care | US\nUS:JNJ | Health Care | US\n"
-        "US:MRK | Health Care | US\nUS:ABBV | Health Care | US\n"
-        "US:AMGN | Health Care | US"
+        "XOM US Equity | Energy | US\nCVX US Equity | Energy | US\nCOP US Equity | Energy | US\n"
+        "SLB US Equity | Energy | US\nEOG US Equity | Energy | US\n"
+        "LLY US Equity | Health Care | US\nJNJ US Equity | Health Care | US\n"
+        "MRK US Equity | Health Care | US\nABBV US Equity | Health Care | US\n"
+        "AMGN US Equity | Health Care | US"
     )
     controls = (
         universe,
@@ -316,7 +337,7 @@ def test_request_uses_factor_specs():
 
 
 def test_comparisons_and_residualization_in_playground():
-    args = list(controls(extra="Sector | US:IHE"))
+    args = list(controls(extra="Sector | IHE US Equity"))
     args[12] = "Market | market_excess\nMarket and sector | market_excess,extra_0"
     args[13:] = ["controls", ["extra_0"], ["market_excess", "hml"], []]
     report = run_study("demo", *args)
@@ -335,7 +356,7 @@ def test_demo_histories_are_independent_of_model_selection(frequency):
 
     base = list(controls(frequency=frequency))
     with_extra = list(base)
-    with_extra[3] = "Sector | US:IHE"
+    with_extra[3] = "Sector | IHE US Equity"
     subset = list(with_extra)
     subset[2] = subset[2][:-1]
     studies = [demo_request(build_request(*args)) for args in (base, with_extra, subset)]
@@ -400,3 +421,19 @@ def test_incomplete_sequential_order_and_empty_controls_are_rejected():
     args[13:] = ["controls", [], [], []]
     with pytest.raises(ValueError):
         build_request(*args)
+
+
+def test_french_and_bloomberg_level_pack_build_one_excess_return_study(monkeypatch):
+    import app as module
+    from trade_research.skills.factor_parameters import FactorRegressionParameters
+    pack = module.FACTOR_PACKS["energy_bloomberg"].model_copy(update={"enabled": True})
+    monkeypatch.setitem(module.FACTOR_PACKS, "energy_bloomberg", pack)
+    monkeypatch.setenv("TRADE_RESEARCH_PRICE_PROVIDER", "bloomberg")
+    monkeypatch.delenv("TRADE_RESEARCH_CONFIG", raising=False)
+    args = list(controls(["french", "pack:energy_bloomberg"]))
+    args[2] = ["market_excess", "hml", "brent"]
+    request, settings = study_context("configured", *args)
+    parameters = FactorRegressionParameters.model_validate(request.skill_parameters["factor-regression"])
+    assert parameters.return_mode == "excess_return"
+    assert [f.id for f in settings.bloomberg_factor_pack.level_factors] == ["brent"]
+    assert {f.id for f in parameters.selected_factors()} == {"market_excess", "hml", "brent"}

@@ -18,6 +18,7 @@ import plotly.graph_objects as go
 import numpy as np
 from dash import ALL, Dash, Input, Output, State, dcc, html
 from demo_data import cross_section_demo_request, demo_request
+from watchlist_ui import workspace as watchlist_workspace, register_callbacks as register_watchlist
 from pydantic import ValidationError
 
 from trade_research.domain import AnalysisRequest, InstrumentId
@@ -25,6 +26,10 @@ from trade_research.domain.factors import preset_factors
 from trade_research.domain.models import MAX_FACTOR_COUNT, FactorSpec
 from trade_research.engine import ResearchEngine
 from trade_research.factor_packs import load_factor_packs, merge_factor_packs
+from trade_research.providers import (
+    BloombergReturnMapping,
+    parse_bloomberg_equity_identifier,
+)
 from trade_research.settings import Settings
 from trade_research.skills.cross_sectional_signal import (
     CrossSectionalSignalParameters,
@@ -171,9 +176,7 @@ def pack_for(preset):
 
 def packs_for(presets):
     return tuple(
-        pack
-        for value in selected_pack_values(presets)
-        if (pack := pack_for(value)) is not None
+        pack for value in selected_pack_values(presets) if (pack := pack_for(value)) is not None
     )
 
 
@@ -186,14 +189,11 @@ def bloomberg_is_configured():
 
 BLOOMBERG_DEFAULT = bloomberg_is_configured()
 DEFAULT_SOURCE = "configured" if BLOOMBERG_DEFAULT else "demo"
-DEFAULT_PACKS = (
-    [
-        "pack:" + pack.id
-        for pack in FACTOR_PACKS.values()
-        if pack.enabled and "configured" in pack.sources
-    ][:1]
-    or (["msci_europe"] if BLOOMBERG_DEFAULT else ["french"])
-)
+DEFAULT_PACKS = [
+    "pack:" + pack.id
+    for pack in FACTOR_PACKS.values()
+    if pack.enabled and "configured" in pack.sources
+][:1] or (["msci_europe"] if BLOOMBERG_DEFAULT else ["french"])
 
 
 def data_source_guidance(source):
@@ -201,10 +201,46 @@ def data_source_guidance(source):
 
 
 def instrument(text):
-    market, separator, symbol = (text or "").strip().partition(":")
-    if not separator:
-        raise ValueError("Use MARKET:SYMBOL, for example US:AAPL or XETRA:SAP.")
-    return InstrumentId(market=market.upper(), symbol=symbol.upper())
+    return parse_bloomberg_equity_identifier(text or "").instrument
+
+
+def entered_bloomberg_identities(stock, extra=""):
+    values = [stock]
+    for line in (extra or "").splitlines():
+        if not line.strip():
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) not in (2, 3):
+            raise ValueError(
+                "Extra factors use Label | Bloomberg equity | optional short Bloomberg equity."
+            )
+        values.extend(parts[1:])
+    identities = [parse_bloomberg_equity_identifier(value or "") for value in values]
+    by_instrument = {}
+    for identity in identities:
+        previous = by_instrument.get(identity.instrument)
+        if previous is not None and previous.security != identity.security:
+            raise ValueError("One instrument cannot use two Bloomberg identifiers in one study")
+        by_instrument[identity.instrument] = identity
+    return tuple(by_instrument.values())
+
+
+def add_entered_bloomberg_mappings(settings, identities):
+    entered = {identity.instrument: identity for identity in identities}
+    mappings = list(settings.bloomberg_return_mappings)
+    configured = {mapping.instrument for mapping in mappings}
+    mappings.extend(
+        BloombergReturnMapping(
+            instrument=identity.instrument,
+            security=identity.security,
+            field="PX_LAST",
+            currency=identity.currency,
+            return_basis="adjusted_close_return",
+        )
+        for identity in entered.values()
+        if identity.instrument not in configured
+    )
+    return Settings.model_validate(settings.model_dump() | {"bloomberg_return_mappings": mappings})
 
 
 def parse_lines(text):
@@ -231,7 +267,7 @@ def editor_factors(presets, selected, extra, advanced):
         parts = [part.strip() for part in line.split("|")]
         if len(parts) not in (2, 3):
             raise ValueError(
-                "Extra factors use Label | MARKET:SYMBOL | optional short MARKET:SYMBOL."
+                "Extra factors use Label | Bloomberg equity | optional short Bloomberg equity."
             )
         long_instrument = instrument(parts[1])
         short_instrument = instrument(parts[2]) if len(parts) == 3 else None
@@ -334,11 +370,6 @@ def study_context(source, *controls):
             selected_packs.append(pack.subset(kept))
         if any(factor.id in selected for factor in pack.level_factors) and source != "configured":
             raise ValueError("Bloomberg level packs require the configured source.")
-    if "french" in controls[1] and any(pack.level_factors for pack in selected_packs):
-        raise ValueError(
-            "Fama–French research returns cannot be mixed with Bloomberg level packs in one "
-            "study. Use a Bloomberg market/style pack with Bloomberg level factors."
-        )
     if source == "demo":
         request = demo_request(request)
         settings = Settings()
@@ -349,6 +380,11 @@ def study_context(source, *controls):
     else:
         raise ValueError("Choose a data source.")
     if source == "configured":
+        if settings.price_provider == "bloomberg":
+            identities = entered_bloomberg_identities(
+                controls[0], "" if (controls[4] or "").strip() else controls[3]
+            )
+            settings = add_entered_bloomberg_mappings(settings, identities)
         combined = None
         if selected_packs:
             mapping = next(
@@ -386,12 +422,11 @@ def run_study(source, *controls):
 
 def run_preview(source, *controls):
     request, settings = study_context(source, *controls)
-    preview = ResearchEngine.from_settings(settings).factor_study_preview(request).model_dump(
-        mode="json"
+    preview = (
+        ResearchEngine.from_settings(settings).factor_study_preview(request).model_dump(mode="json")
     )
     requested_instruments = {
-        (item["instrument"]["market"], item["instrument"]["symbol"])
-        for item in preview["inputs"]
+        (item["instrument"]["market"], item["instrument"]["symbol"]) for item in preview["inputs"]
     }
     preview["configured_mappings"] = [
         mapping.model_dump(mode="json")
@@ -410,7 +445,7 @@ def run_preview(source, *controls):
 
 
 def parse_universe(text):
-    """Parse MARKET:SYMBOL | sector | country | optional from | optional to."""
+    """Parse Bloomberg equity | sector | country | optional from | optional to."""
     members = []
     for line in (text or "").splitlines():
         if not line.strip():
@@ -483,6 +518,13 @@ def run_cross_section_study(source, *controls):
         settings = Settings(price_provider="yahoo")
     elif source == "configured":
         settings = Settings.from_environment(os.environ)
+        if settings.price_provider == "bloomberg":
+            identities = tuple(
+                parse_bloomberg_equity_identifier(line.split("|", 1)[0].strip())
+                for line in controls[0].splitlines()
+                if line.strip()
+            )
+            settings = add_entered_bloomberg_mappings(settings, identities)
     else:
         raise ValueError("Choose a data source")
     return asyncio.run(ResearchEngine.from_settings(settings).analyze(request)).model_dump(
@@ -530,8 +572,7 @@ def scenario_impact(moves, identities):
 
 def scenario_inputs(presentation):
     units = {
-        coefficient["term"]: coefficient["unit"]
-        for coefficient in presentation["coefficients"][1:]
+        coefficient["term"]: coefficient["unit"] for coefficient in presentation["coefficients"][1:]
     }
     return [
         {
@@ -754,6 +795,30 @@ def render_preview(preview):
         [
             row["start_date"],
             row["end_date"],
+            html.H4("Research sources and alignment"),
+            table(
+                ["Source", "Currency convention", "Observations", "Reference"],
+                [
+                    [d["source"], d["currency"], d["observation_count"], d["reference"]]
+                    for d in preview["datasets"]
+                ],
+            ),
+            table(
+                ["Input", "Available", "Missing", "Alignment losses"],
+                [
+                    [
+                        c["role"],
+                        c["available_periods"],
+                        c["invalid_or_missing_periods"],
+                        c["alignment_losses"],
+                    ]
+                    for c in preview["coverage"]
+                ],
+            ),
+            table(
+                ["Factor", "Unit", "Quotation currency"],
+                [[c["label"], c["unit"], c.get("currency") or "Study currency"] for c in columns],
+            ),
             *(f"{value:.8g}" for value in row["values"]),
         ]
         for row in rows[-120:]
@@ -832,13 +897,14 @@ def collinearity_recommendations(presentation, *, correlation_limit=0.8, vif_lim
     for left in range(len(factor_ids)):
         for right in range(left + 1, len(factor_ids)):
             correlation_value = matrix[left][right]
-            if abs(correlation_value) < correlation_limit or max(vifs[left], vifs[right]) < vif_limit:
+            if (
+                abs(correlation_value) < correlation_limit
+                or max(vifs[left], vifs[right]) < vif_limit
+            ):
                 continue
             left_increment = relationships[factor_ids[left]]["incremental_r_squared"]
             right_increment = relationships[factor_ids[right]]["incremental_r_squared"]
-            remove, keep = (
-                (right, left) if right_increment <= left_increment else (left, right)
-            )
+            remove, keep = (right, left) if right_increment <= left_increment else (left, right)
             suggestions.append(
                 f"Review removing {labels[remove]} before {labels[keep]}: pair correlation "
                 f"is {correlation_value:.2f}, VIFs are {vifs[left]:.1f}/{vifs[right]:.1f}, and "
@@ -1411,6 +1477,34 @@ def workspace_header(kicker, title, description, badges):
     )
 
 
+def factor_pack_options():
+    return [
+        {
+            "label": "Built-in · Fama–French 5 + momentum",
+            "value": "french",
+        },
+        {"label": "Built-in · US ETF proxies", "value": "us_etf"},
+        {
+            "label": "Built-in · MSCI Europe · configured provider",
+            "value": "msci_europe",
+        },
+        *[
+            {
+                "label": "YAML pack · "
+                + pack.label.replace("\\xB7", "·")
+                + (" · configure YAML first" if not pack.enabled else ""),
+                "value": "pack:" + pack.id,
+                "disabled": not pack.enabled,
+            }
+            for pack in FACTOR_PACKS.values()
+        ],
+        {
+            "label": "Blank model · add benchmarks manually below",
+            "value": "custom",
+        },
+    ]
+
+
 def single_stock_workspace():
     controls = html.Aside(
         [
@@ -1452,45 +1546,24 @@ def single_stock_workspace():
                         className="source-guidance",
                     ),
                     field(
-                        "Stock identifier",
+                        "Bloomberg equity identifier",
                         dcc.Input(
                             id="stock",
-                            value="US:AAPL",
-                            placeholder="MARKET:SYMBOL",
+                            value="AAPL US Equity",
+                            placeholder="TICKER EXCHANGE Equity",
                         ),
                     ),
-                    help_text("Examples: BME:REP for Repsol, US:AAPL, XETRA:SAP."),
+                    help_text(
+                        "Examples: REP SM Equity for Repsol, AAPL US Equity, SAP GY Equity. "
+                        "The same identifier maps to Bloomberg or Yahoo according to the source."
+                    ),
                     field(
                         "Factor packs",
                         dcc.Dropdown(
                             searchable=False,
                             id="preset",
                             multi=True,
-                            options=[
-                                {
-                                    "label": "Built-in · Fama–French 5 + momentum",
-                                    "value": "french",
-                                },
-                                {"label": "Built-in · US ETF proxies", "value": "us_etf"},
-                                {
-                                    "label": "Built-in · MSCI Europe · configured provider",
-                                    "value": "msci_europe",
-                                },
-                                *[
-                                    {
-                                        "label": "YAML pack · "
-                                        + pack.label.replace("\\xB7", "·")
-                                        + (" · configure YAML first" if not pack.enabled else ""),
-                                        "value": "pack:" + pack.id,
-                                        "disabled": not pack.enabled,
-                                    }
-                                    for pack in FACTOR_PACKS.values()
-                                ],
-                                {
-                                    "label": "Blank model · add benchmarks manually below",
-                                    "value": "custom",
-                                },
-                            ],
+                            options=factor_pack_options(),
                             value=DEFAULT_PACKS,
                             clearable=False,
                         ),
@@ -1501,7 +1574,9 @@ def single_stock_workspace():
                         dcc.Dropdown(searchable=False, id="selected", multi=True),
                     ),
                     help_text(
-                        "Selected packs are combined here. Select or remove individual factors "
+                        "Combine Fama–French and Bloomberg packs in one study. French models use USD "
+                        "stock excess returns; price-change factors retain their declared units. "
+                        "Select or remove individual factors "
                         "before running. Duplicate factor IDs across packs are rejected. Disabled "
                         "YAML packs must be configured "
                         "and enabled in "
@@ -1579,7 +1654,10 @@ def single_stock_workspace():
                         dcc.Textarea(
                             id="extra",
                             value="",
-                            placeholder="Pharma | US:IHE\nEnergy spread | US:XLE | US:IWB",
+                            placeholder=(
+                                "Pharma | IHE US Equity\n"
+                                "Energy spread | XLE US Equity | IWB US Equity"
+                            ),
                             className="code-input short",
                         ),
                     ),
@@ -1783,17 +1861,20 @@ def cross_section_workspace():
                         dcc.Textarea(
                             id="cs-universe",
                             value=(
-                                "US:XOM | Energy | US\nUS:CVX | Energy | US\n"
-                                "US:COP | Energy | US\nUS:SLB | Energy | US\nUS:EOG | Energy | US\n"
-                                "US:LLY | Health Care | US\nUS:JNJ | Health Care | US\n"
-                                "US:MRK | Health Care | US\nUS:ABBV | Health Care | US\n"
-                                "US:AMGN | Health Care | US"
+                                "XOM US Equity | Energy | US\nCVX US Equity | Energy | US\n"
+                                "COP US Equity | Energy | US\nSLB US Equity | Energy | US\n"
+                                "EOG US Equity | Energy | US\n"
+                                "LLY US Equity | Health Care | US\n"
+                                "JNJ US Equity | Health Care | US\n"
+                                "MRK US Equity | Health Care | US\n"
+                                "ABBV US Equity | Health Care | US\n"
+                                "AMGN US Equity | Health Care | US"
                             ),
                             className="code-input universe-input",
                         ),
                     ),
                     help_text(
-                        "MARKET:SYMBOL | sector | country | optional member-from | "
+                        "Bloomberg equity identifier | sector | country | optional member-from | "
                         "optional member-to"
                     ),
                     field(
@@ -1969,6 +2050,15 @@ app.layout = html.Div(
                     children=single_stock_workspace(),
                 ),
                 dcc.Tab(
+                    label="Watchlist attribution",
+                    value="watchlist",
+                    className="workspace-tab",
+                    selected_className="workspace-tab--selected",
+                    children=watchlist_workspace(
+                        factor_pack_options(), DEFAULT_SOURCE, DEFAULT_PACKS
+                    ),
+                ),
+                dcc.Tab(
                     label="Cross-sectional signals",
                     value="cross-sectional",
                     className="workspace-tab",
@@ -2124,9 +2214,7 @@ def describe_pack(presets):
                     [
                         html.Li(
                             f"{f.label}: {f.transform} of "
-                            + " + ".join(
-                                f"{weight:g} × {key}" for key, weight in f.legs.items()
-                            )
+                            + " + ".join(f"{weight:g} × {key}" for key, weight in f.legs.items())
                         )
                         for f in pack.level_factors
                     ]
@@ -2312,6 +2400,9 @@ def update_cross_section_result(_clicks, source, *controls):
             f"Study failed. Stage: execution · Code: {type(error).__name__} · "
             f"Reference: {reference}. Check provider configuration. Raw payloads are not logged."
         )
+
+
+register_watchlist(app, study_context, select_preset, WARNINGS)
 
 
 if __name__ == "__main__":
