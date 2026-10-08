@@ -35,8 +35,8 @@ HTTP server, Docker, Node.js and an LLM subscription are unnecessary. `requireme
 is a convenience installation combining the same backend and UI pins. The UI lock contains
 only additional packages, so backend versions have one authoritative definition.
 
-Read the [Windows/JFrog and offline installation guide](../TradeAgent/docs/corporate-installation.md)
-before transferring the project. The [dependency audit](../TradeAgent/docs/dependency-audit.md)
+Read the [Windows/JFrog and offline installation guide](https://github.com/MC-Kangan/TradeAgent/blob/feature/local-research-framework/docs/corporate-installation.md)
+before installing the project. The [dependency audit](https://github.com/MC-Kangan/TradeAgent/blob/feature/local-research-framework/docs/dependency-audit.md)
 identifies packages to check with IT, including Bloomberg `blpapi`, platform-specific wheels
 and the `backtesting` license. Windows and live corporate Bloomberg access still require
 validation on your firm machine; local validation was on macOS.
@@ -75,7 +75,7 @@ The pack-directory variable is optional; omit it to use the bundled `factor_pack
 The app reads process environment directly and does **not** automatically load `.env`.
 The CLI's `.env` behavior is separate. Keep credentials outside packs and source control.
 For Bloomberg mappings, units, currencies and BPIPE limitations, follow the
-[corporate configuration example](../TradeAgent/docs/corporate-installation.md#bloomberg-configuration).
+[corporate configuration example](https://github.com/MC-Kangan/TradeAgent/blob/feature/local-research-framework/docs/corporate-installation.md#bloomberg-configuration).
 
 ## Use
 
@@ -99,10 +99,23 @@ For Bloomberg mappings, units, currencies and BPIPE limitations, follow the
    R² measures historical explanation, not predictability. The standardized-effect
    chart helps compare factors with different units. Plotly charts support hover,
    zoom, pan and image export from their graph toolbar.
-8. Open **Data inspector** and click **Load current data** to issue a fresh provider
-   query. The single chart plots every aligned model input on a standardized scale;
-   hover a date to see its exact model value, unit and currency. The preview stays in
-   memory and is not written into the research report.
+8. Open **Data inspector** and click **Load current data** to query daily vendor price
+   levels in their original quotation, before FX conversion and factor transforms.
+   Choose a stock, benchmark or spread leg from the chart selector and hover for prices.
+   Equity histories retain corporate-action adjustments; compare with matching Bloomberg
+   adjustment settings. Bloomberg pack values are shown before YAML scaling. A configured
+   currency is not necessarily the vendor quotation unit (for example GBP versus pence).
+   The price definitions explain the basis. Fama–French portfolios have returns, not raw
+   prices. Demo mode explicitly shows synthetic model inputs instead of invented prices.
+   Inspection stays in memory and does not require a completed regression or French download.
+   Open **Model inputs and alignment** only when you need the normalized observations used by
+   the regression, including FX conversion, factor transformations, missingness and common-date
+   losses. This second query remains separate so a price check does not require a French download.
+
+Original stock-to-factor Pearson correlations are visible in the main single-stock results,
+before orthogonalization. The complete factor-to-factor matrix and additional relationship
+statistics remain under Technical diagnostics, where a large factor set does not overwhelm the
+main view. Correlations use aligned returns or changes rather than price levels.
 
 Monthly is a useful starting point for cross-market research. Only daily/monthly
 are currently implemented. More factors are not automatically better: correlated
@@ -161,7 +174,7 @@ The stock-entry translator supports Bloomberg U.S. composite/venue codes (`US`, 
 instead of being assigned a guessed Yahoo market. Some share-class roots differ between
 vendors; verify the resolved series in **Data inspector** before using it.
 
-See ../TradeAgent/docs/factor-mvp2-implementation.md for provider contracts, cash
+See the [backend implementation guide](https://github.com/MC-Kangan/TradeAgent/blob/feature/local-research-framework/docs/factor-mvp2-implementation.md) for provider contracts, cash
 semantics, native monthly inputs, coverage and assumptions. Custom providers can be
 registered in ResearchEngine without changing the estimator; this UI does not attempt
 to load arbitrary provider code or credentials.
@@ -227,7 +240,7 @@ use the pack's declared price unit. The app always uses the original joint-model
 even when the attribution view is orthogonalized. It shows `beta × move` in basis points
 and excludes the intercept and unexplained residual. It is a linear sensitivity, not a
 forecast or reconciled P&L attribution. See the backend
-[interpretation guide](../TradeAgent/docs/factor-diagnostics-scenarios.md).
+[interpretation guide](https://github.com/MC-Kangan/TradeAgent/blob/feature/local-research-framework/docs/factor-diagnostics-scenarios.md).
 
 Named model subsets still use `Model name | factor_id,other_id`. Factor IDs appear
 in selection labels; manually entered extra factors use `extra_0`, `extra_1`, etc.
@@ -297,7 +310,7 @@ frequency. Bloomberg stock returns use corporate-action-adjusted `PX_LAST`; Yaho
 returns use adjusted close.
 
 For the schema, Repsol currency considerations and backend configuration, see
-[the YAML pack guide](../TradeAgent/docs/factor-yaml-packs.md). Pack definitions are
+[the YAML pack guide](https://github.com/MC-Kangan/TradeAgent/blob/feature/local-research-framework/docs/factor-yaml-packs.md). Pack definitions are
 local configuration; no raw licensed observations or credentials belong in them.
 
 ## Troubleshooting
@@ -322,8 +335,8 @@ local configuration; no raw licensed observations or credentials belong in them.
 
 With **Configured providers · Bloomberg**, select **Fama–French** and an enabled
 Bloomberg energy or MSCI YAML pack together, then deselect unwanted factors. The
-backend combines the selected columns before estimation and the data inspector uses
-the identical alignment pipeline.
+backend combines the selected columns before estimation. The data inspector separately
+shows vendor price levels before alignment, FX conversion and return transformations.
 
 The combined regression is conceptually `stock excess return = Fama–French factors +
 index-proxy returns + commodity changes + residual`. French models use USD stock excess
@@ -339,15 +352,20 @@ never filled. The app does not rename an index proxy as a Fama–French factor: 
 keeps a unique ID, source, transform, currency and unit. Because style indices often
 overlap with Fama–French factors, inspect correlation and VIF before interpreting their
 joint betas. Keep the original joint model as the reference and use residualization only
-as a secondary attribution view. Use the inspector chart for visual alignment checks and
+as a secondary attribution view. Use the inspector chart to verify vendor prices and
 open **Technical diagnostics** for source-specific coverage losses.
 
 French files still require web access to the official Kenneth French library. Pack-only
 studies do not fetch French files. See the backend
-[composition guide](../TradeAgent/docs/factor-panel-composition.md) for details.
+[composition guide](https://github.com/MC-Kangan/TradeAgent/blob/feature/local-research-framework/docs/factor-panel-composition.md) for details.
 
 
 ## Watchlist attribution
+
+Configuration and automatic refresh controls are in the left sidebar. The main area
+contains the full results grid and selected-stock details. Neutral alternating rows and
+green selection styling replace yellow row shading; lagged observations remain explicitly
+labelled in the Status column. Sorting, filtering and row selection remain available.
 
 Use the **Watchlist attribution** tab for up to 20 Bloomberg equity identifiers,
 one per line. Select a source, one or more enabled factor packs, individual factors,

@@ -5,9 +5,9 @@ import pytest
 from app import (
     _p_value,
     app,
+    bloomberg_is_configured,
     build_cross_section_request,
     build_request,
-    bloomberg_is_configured,
     collinearity_recommendations,
     combined_correlation_matrix,
     data_source_guidance,
@@ -17,8 +17,9 @@ from app import (
     render_cross_section_result,
     render_preview,
     render_result,
-    run_preview,
     run_cross_section_study,
+    run_model_preview,
+    run_preview,
     run_study,
     scenario_impact,
     scenario_inputs,
@@ -285,7 +286,9 @@ def test_bloomberg_stock_identifier_builds_exact_configured_mapping(monkeypatch)
 
     assert request.instrument.market == "BME"
     assert request.instrument.symbol == "REP"
-    mapping = next(item for item in settings.bloomberg_return_mappings if item.instrument == request.instrument)
+    mapping = next(
+        item for item in settings.bloomberg_return_mappings if item.instrument == request.instrument
+    )
     assert mapping.security == "REP SM Equity"
     assert mapping.field == "PX_LAST"
     assert mapping.currency == "EUR"
@@ -305,6 +308,64 @@ def test_data_preview_uses_the_same_aligned_model_inputs():
     assert "Input definitions and exact rows" in rendered
     assert "Vendor field" in rendered
     assert "Research sources and alignment" in rendered
+
+
+def test_live_price_preview_does_not_require_french_download_or_regression(monkeypatch):
+    from datetime import date
+
+    import app as module
+
+    from trade_research.price_inspection import InspectionSeries, PriceObservation
+
+    monkeypatch.setattr(
+        module,
+        "inspect_prices",
+        lambda *_: (
+            InspectionSeries(
+                label="REP SM Equity",
+                source="bloomberg",
+                field="PX_LAST",
+                quotation="EUR",
+                basis="Adjusted local price",
+                points=(PriceObservation(date=date(2024, 1, 2), value=14.5),),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        module.ResearchEngine, "from_settings", lambda *_: pytest.fail("Must not fit or align")
+    )
+    preview = run_preview("yahoo", *controls())
+    assert preview["price_series"][0]["points"][0]["value"] == 14.5
+    assert "Local price levels" in str(render_preview(preview))
+
+
+def test_live_model_preview_retains_aligned_input_audit(monkeypatch):
+    import app as module
+
+    expected = run_preview("demo", *controls())
+
+    class Engine:
+        def factor_study_preview(self, _request):
+            class Preview:
+                def model_dump(self, mode):
+                    assert mode == "json"
+                    return expected
+
+            return Preview()
+
+    monkeypatch.setattr(module.ResearchEngine, "from_settings", lambda *_: Engine())
+    preview = run_model_preview("yahoo", *controls())
+
+    assert preview["schema_version"] == "factor-study-preview-v1"
+    assert "Aligned model inputs" in str(render_preview(preview))
+
+
+def test_single_stock_layout_keeps_price_and_model_audits_separate():
+    client = app.server.test_client()
+    layout = client.get("/_dash-layout").data
+
+    assert b"load-preview" in layout
+    assert b"load-model-preview" in layout
 
 
 def test_data_preview_keeps_tables_behind_one_closed_drill_down():
@@ -493,7 +554,9 @@ def test_incomplete_sequential_order_and_empty_controls_are_rejected():
 
 def test_french_and_bloomberg_level_pack_build_one_excess_return_study(monkeypatch):
     import app as module
+
     from trade_research.skills.factor_parameters import FactorRegressionParameters
+
     pack = module.FACTOR_PACKS["energy_bloomberg"].model_copy(update={"enabled": True})
     monkeypatch.setitem(module.FACTOR_PACKS, "energy_bloomberg", pack)
     monkeypatch.setenv("TRADE_RESEARCH_PRICE_PROVIDER", "bloomberg")
@@ -501,7 +564,9 @@ def test_french_and_bloomberg_level_pack_build_one_excess_return_study(monkeypat
     args = list(controls(["french", "pack:energy_bloomberg"]))
     args[2] = ["market_excess", "hml", "brent"]
     request, settings = study_context("configured", *args)
-    parameters = FactorRegressionParameters.model_validate(request.skill_parameters["factor-regression"])
+    parameters = FactorRegressionParameters.model_validate(
+        request.skill_parameters["factor-regression"]
+    )
     assert parameters.return_mode == "excess_return"
     assert [f.id for f in settings.bloomberg_factor_pack.level_factors] == ["brent"]
     assert {f.id for f in parameters.selected_factors()} == {"market_excess", "hml", "brent"}

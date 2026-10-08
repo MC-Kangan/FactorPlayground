@@ -81,130 +81,144 @@ def workspace(pack_options, default_source, default_packs):
     def field(label, component):
         return html.Div([html.Label(label), component], className="field")
 
-    return html.Div(
+    title = html.H2("Watchlist attribution")
+    subtitle = html.P(
+        "Daily closing-data monitor · original-factor OLS/HAC · contributions in basis points."
+    )
+    explanation = html.P(
+        "Refresh fetches data and refits each model using observations before the displayed "
+        "day. Today’s partial session is excluded. This is an estimate of contemporaneous "
+        "exposure, not a causal explanation or trading signal."
+    )
+    settings = html.Details(
         [
-            html.H2("Watchlist attribution"),
-            html.P(
-                "Daily closing-data monitor · original-factor OLS/HAC · contributions in basis "
-                "points."
-            ),
-            html.P(
-                "Refresh fetches data and refits each model using observations before the "
-                "displayed day. "
-                "Today’s partial session is excluded. This is an estimate of contemporaneous "
-                "exposure, "
-                "not a causal explanation or trading signal."
-            ),
-            html.Details(
-                [
-                    html.Summary("Configure watchlist and factors"),
-                    field(
-                        "Data source",
-                        dcc.Dropdown(
-                            id="wl-source",
-                            options=[
-                                {"label": "Synthetic demo · offline", "value": "demo"},
-                                {"label": "Yahoo + published research factors", "value": "yahoo"},
-                                {
-                                    "label": "Configured providers · Bloomberg",
-                                    "value": "configured",
-                                },
-                            ],
-                            value=default_source,
-                            clearable=False,
-                            searchable=False,
-                        ),
-                    ),
-                    field(
-                        "Bloomberg identifiers · one per line · maximum 20",
-                        dcc.Textarea(
-                            id="wl-tickers",
-                            value="REP SM Equity\nSHEL LN Equity\nTTE FP Equity",
-                            style={"width": "100%", "height": "110px"},
-                        ),
-                    ),
-                    field(
-                        "Factor packs",
-                        dcc.Dropdown(
-                            id="wl-packs",
-                            options=pack_options,
-                            value=default_packs,
-                            multi=True,
-                            searchable=False,
-                        ),
-                    ),
-                    field(
-                        "Selected factors",
-                        dcc.Dropdown(id="wl-factors", multi=True, searchable=False),
-                    ),
-                    field(
-                        "Research region",
-                        dcc.Dropdown(
-                            id="wl-region",
-                            options=["Europe", "US"],
-                            value="Europe",
-                            clearable=False,
-                            searchable=False,
-                        ),
-                    ),
-                    field(
-                        "Training history starts",
-                        dcc.Input(
-                            id="wl-start",
-                            type="date",
-                            value=(datetime.now(UTC).date() - timedelta(days=3 * 365)).isoformat(),
-                        ),
-                    ),
-                    field(
-                        "Minimum training observations",
-                        dcc.Input(
-                            id="wl-minimum", type="number", min=60, max=2520, step=1, value=252
-                        ),
-                    ),
-                    field(
-                        "HAC lags",
-                        dcc.Input(id="wl-lags", type="number", min=0, max=60, step=1, value=5),
-                    ),
-                    html.P(
-                        "YAML packs use the same definitions as single-stock analysis. French "
-                        "factors may "
-                        "lag and are never replaced with ETF proxies. Stock returns may be "
-                        "excess returns "
-                        "in USD: check each row’s currency and basis. Use single-stock "
-                        "diagnostics to "
-                        "investigate collinearity; this monitor keeps the original factor basis."
-                    ),
-                ],
-                open=True,
-            ),
-            html.Button("Refresh data and refit", id="wl-refresh", n_clicks=0),
+            html.Summary("Configure watchlist and factors"),
             field(
-                "Automatic refresh · active only on this tab",
+                "Data source",
                 dcc.Dropdown(
-                    id="wl-auto",
+                    id="wl-source",
                     options=[
-                        {"label": "Off", "value": 0},
-                        {"label": "Every 5 minutes", "value": 300000},
-                        {"label": "Every 15 minutes", "value": 900000},
-                        {"label": "Every hour", "value": 3600000},
+                        {"label": "Synthetic demo · offline", "value": "demo"},
+                        {"label": "Yahoo + published research factors", "value": "yahoo"},
+                        {"label": "Configured providers · Bloomberg", "value": "configured"},
                     ],
-                    value=0,
+                    value=default_source,
                     clearable=False,
                     searchable=False,
                 ),
             ),
-            html.P(
-                "Changing settings applies on the next refresh. Auto-refresh refits the whole "
-                "watchlist."
+            field(
+                "Bloomberg identifiers · one per line · maximum 20",
+                dcc.Textarea(
+                    id="wl-tickers",
+                    value="REP SM Equity\nSHEL LN Equity\nTTE FP Equity",
+                    style={"width": "100%", "height": "110px"},
+                ),
             ),
-            dcc.Interval(id="wl-timer", interval=300000, n_intervals=0, disabled=True),
-            dcc.Store(id="wl-rows", storage_type="memory"),
-            html.Div(id="wl-status", role="status"),
-            dcc.Loading(html.Div(render_rows([]), id="wl-results")),
-            html.Div(id="wl-detail"),
+            field(
+                "Factor packs",
+                dcc.Dropdown(
+                    id="wl-packs",
+                    options=pack_options,
+                    value=default_packs,
+                    multi=True,
+                    searchable=False,
+                ),
+            ),
+            field(
+                "Selected factors",
+                dcc.Dropdown(id="wl-factors", multi=True, searchable=False),
+            ),
+            field(
+                "Research region",
+                dcc.Dropdown(
+                    id="wl-region",
+                    options=["Europe", "US"],
+                    value="Europe",
+                    clearable=False,
+                    searchable=False,
+                ),
+            ),
+            field(
+                "Training history starts",
+                dcc.Input(
+                    id="wl-start",
+                    type="date",
+                    value=(datetime.now(UTC).date() - timedelta(days=3 * 365)).isoformat(),
+                ),
+            ),
+            field(
+                "Minimum training observations",
+                dcc.Input(id="wl-minimum", type="number", min=60, max=2520, step=1, value=252),
+            ),
+            field(
+                "HAC lags",
+                dcc.Input(id="wl-lags", type="number", min=0, max=60, step=1, value=5),
+            ),
+            html.P(
+                "YAML packs use the same definitions as single-stock analysis. French factors "
+                "may lag and are never replaced with ETF proxies. Stock returns may be excess "
+                "returns in USD: check each row’s currency and basis. Use single-stock "
+                "diagnostics to investigate collinearity; this monitor keeps the original basis."
+            ),
         ],
-        className="result-card",
-        style={"padding": "24px"},
+        open=True,
+    )
+    refresh = html.Button(
+        "Refresh data and refit", id="wl-refresh", n_clicks=0, className="primary"
+    )
+    auto_refresh = field(
+        "Automatic refresh · active only on this tab",
+        dcc.Dropdown(
+            id="wl-auto",
+            options=[
+                {"label": "Off", "value": 0},
+                {"label": "Every 5 minutes", "value": 300000},
+                {"label": "Every 15 minutes", "value": 900000},
+                {"label": "Every hour", "value": 3600000},
+            ],
+            value=0,
+            clearable=False,
+            searchable=False,
+        ),
+    )
+    refresh_note = html.P(
+        "Changing settings applies on the next refresh. Auto-refresh refits the whole watchlist."
+    )
+    timer = dcc.Interval(id="wl-timer", interval=300000, n_intervals=0, disabled=True)
+    store = dcc.Store(id="wl-rows", storage_type="memory")
+    status = html.Div(id="wl-status", role="status")
+    results = dcc.Loading(html.Div(render_rows([]), id="wl-results"))
+    detail = html.Div(id="wl-detail")
+    return html.Div(
+        [
+            html.Div([title, subtitle], className="workspace-header"),
+            html.Div(
+                [
+                    html.Aside(
+                        [
+                            html.Div("WATCHLIST SETTINGS", className="control-heading eyebrow"),
+                            settings,
+                            refresh,
+                            auto_refresh,
+                            html.Details(
+                                [
+                                    html.Summary("About refresh and attribution"),
+                                    explanation,
+                                    refresh_note,
+                                ]
+                            ),
+                        ],
+                        className="control-panel watchlist-controls",
+                    ),
+                    html.Main([status, results, detail], className="watchlist-results"),
+                ],
+                className="workspace-grid watchlist-grid",
+            ),
+            timer,
+            store,
+        ],
+        className="workspace watchlist-workspace",
     )
 
 
@@ -279,16 +293,39 @@ def render_rows(rows):
                 filter_action="native",
                 page_size=20,
                 style_table={"overflowX": "auto"},
+                style_header={
+                    "backgroundColor": "#f0f5f3",
+                    "color": "#17344d",
+                    "fontWeight": "600",
+                    "border": "1px solid #dbe4df",
+                },
                 style_cell={
                     "minWidth": "100px",
                     "maxWidth": "240px",
                     "whiteSpace": "normal",
                     "padding": "8px",
+                    "backgroundColor": "#ffffff",
+                    "color": "#152923",
+                    "border": "1px solid #e6ece8",
+                    "fontFamily": "inherit",
+                    "fontSize": "12px",
                 },
                 style_data_conditional=[
+                    {"if": {"row_index": "odd"}, "backgroundColor": "#f8faf9"},
                     {
-                        "if": {"filter_query": '{Status} = "Lagged data"'},
-                        "backgroundColor": "#fff1cc",
+                        "if": {"filter_query": '{Status} = "Lagged data"', "column_id": "Status"},
+                        "color": "#74561e",
+                        "fontWeight": "600",
+                    },
+                    {
+                        "if": {"state": "selected"},
+                        "backgroundColor": "#e6f1ed",
+                        "border": "1px solid #116653",
+                    },
+                    {
+                        "if": {"state": "active"},
+                        "backgroundColor": "#e6f1ed",
+                        "border": "1px solid #116653",
                     },
                     {"if": {"column_id": "Unexplained bp"}, "fontWeight": "bold"},
                 ],

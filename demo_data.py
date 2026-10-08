@@ -12,8 +12,8 @@ from trade_research.domain.models import (
     ResearchFactorPanel,
     ResearchFactorPoint,
 )
-from trade_research.skills.factor_data import month_end, session_dates
 from trade_research.skills.cross_sectional_signal import CrossSectionalSignalParameters
+from trade_research.skills.factor_data import month_end, session_dates
 from trade_research.skills.factor_regression import FactorRegressionParameters
 
 

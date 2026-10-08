@@ -106,6 +106,12 @@ footer { margin-top: 25px; color: var(--muted); font-size: 10px; letter-spacing:
 .Select-value-label, .Select-placeholder { font-size: 11px !important; }
 .Select-menu-outer { z-index: 1005 !important; font-size: 11px !important; }
 .research-graph { border-top: 1px solid var(--line); margin-top: 18px; }
+.watchlist-results { min-width: 0; padding: 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+.watchlist-controls > details, .watchlist-controls > .field { padding: 14px 20px; }
+.watchlist-controls summary { cursor: pointer; font-weight: 700; margin-bottom: 12px; }
+.watchlist-controls p { color: var(--muted); font-size: 11px; }
+.watchlist-results #wl-status { color: var(--brand); margin-bottom: 14px; }
+.watchlist-results .dash-spreadsheet { --accent: #116653; --selected-background: #e6f1ed; }
 
 @media (max-width: 1120px) {
   .shell { padding: 26px; }

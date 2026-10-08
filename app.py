@@ -14,18 +14,20 @@ import webbrowser
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import plotly.graph_objects as go
 import numpy as np
+import plotly.graph_objects as go
 from dash import ALL, Dash, Input, Output, State, dcc, html
 from demo_data import cross_section_demo_request, demo_request
-from watchlist_ui import workspace as watchlist_workspace, register_callbacks as register_watchlist
 from pydantic import ValidationError
+from watchlist_ui import register_callbacks as register_watchlist
+from watchlist_ui import workspace as watchlist_workspace
 
 from trade_research.domain import AnalysisRequest, InstrumentId
 from trade_research.domain.factors import preset_factors
 from trade_research.domain.models import MAX_FACTOR_COUNT, FactorSpec
 from trade_research.engine import ResearchEngine
 from trade_research.factor_packs import load_factor_packs, merge_factor_packs
+from trade_research.price_inspection import inspect_prices
 from trade_research.providers import (
     BloombergReturnMapping,
     parse_bloomberg_equity_identifier,
@@ -422,6 +424,16 @@ def run_study(source, *controls):
 
 def run_preview(source, *controls):
     request, settings = study_context(source, *controls)
+    if source != "demo":
+        return {
+            "price_series": [
+                series.model_dump(mode="json") for series in inspect_prices(request, settings)
+            ]
+        }
+    return _model_preview(request, settings)
+
+
+def _model_preview(request, settings):
     preview = (
         ResearchEngine.from_settings(settings).factor_study_preview(request).model_dump(mode="json")
     )
@@ -442,6 +454,11 @@ def run_preview(source, *controls):
         else {}
     )
     return preview
+
+
+def run_model_preview(source, *controls):
+    request, settings = study_context(source, *controls)
+    return _model_preview(request, settings)
 
 
 def parse_universe(text):
@@ -759,6 +776,63 @@ def coverage_table(coverage):
 
 
 def render_preview(preview):
+    if "price_series" in preview:
+        series = preview["price_series"]
+        figure = go.Figure()
+        buttons = []
+        for index, item in enumerate(series):
+            caption = f"{item['label']} · {item['field']} · {item['quotation']}"
+            figure.add_scatter(
+                x=[p["date"] for p in item["points"]],
+                y=[p["value"] for p in item["points"]],
+                name=item["label"],
+                mode="lines",
+                connectgaps=False,
+                visible=index == 0,
+                hovertemplate="%{x}<br>Price: %{y:.8g}<extra>%{fullData.name}</extra>",
+            )
+            buttons.append(
+                dict(
+                    label=item["label"],
+                    method="update",
+                    args=[
+                        {"visible": [i == index for i in range(len(series))]},
+                        {"title.text": caption, "yaxis.title.text": item["quotation"]},
+                    ],
+                )
+            )
+        if not series:
+            return html.P("No price series are available for these settings.")
+        first = series[0]
+        finish_figure(
+            figure, f"{first['label']} · {first['field']}", yaxis_title=first["quotation"]
+        )
+        figure.update_layout(
+            updatemenus=[dict(buttons=buttons, x=0, y=1.2)], margin=dict(t=110), showlegend=False
+        )
+        return html.Div(
+            [
+                html.H3("Local price levels"),
+                html.P(
+                    "Select a series and hover to compare with Bloomberg. Daily prices are shown "
+                    "before FX, return transforms and common-date filtering. Fama–French "
+                    "portfolios are published returns and have no raw price series."
+                ),
+                graph(figure),
+                html.Details(
+                    [
+                        html.Summary("Price definitions"),
+                        table(
+                            ["Series", "Source", "Field", "Quotation", "Basis"],
+                            [
+                                [s[k] for k in ("label", "source", "field", "quotation", "basis")]
+                                for s in series
+                            ],
+                        ),
+                    ]
+                ),
+            ]
+        )
     columns = preview["columns"]
     rows = preview["rows"]
     if not rows:
@@ -800,7 +874,15 @@ def render_preview(preview):
         ),
         html.H4("Input definitions"),
         table(
-            ["Role", "Instrument", "Source", "Vendor field", "Return basis", "Currency", "Intervals"],
+            [
+                "Role",
+                "Instrument",
+                "Source",
+                "Vendor field",
+                "Return basis",
+                "Currency",
+                "Intervals",
+            ],
             [
                 [
                     item["role"],
@@ -863,7 +945,14 @@ def render_preview(preview):
                 table(
                     ["Input", "Bloomberg security", "Field", "Currency", "Unit", "Scale"],
                     [
-                        [key, item["security"], item["field"], item["currency"], item["unit"], item["scale"]]
+                        [
+                            key,
+                            item["security"],
+                            item["field"],
+                            item["currency"],
+                            item["unit"],
+                            item["scale"],
+                        ]
                         for key, item in pack_inputs.items()
                     ],
                 ),
@@ -876,7 +965,11 @@ def render_preview(preview):
             table(
                 ["Start", "End", *(f"{c['label']} · {c['unit']}" for c in columns)],
                 [
-                    [row["start_date"], row["end_date"], *(f"{value:.8g}" for value in row["values"])]
+                    [
+                        row["start_date"],
+                        row["end_date"],
+                        *(f"{value:.8g}" for value in row["values"]),
+                    ]
                     for row in rows[-120:]
                 ],
             ),
@@ -884,7 +977,7 @@ def render_preview(preview):
     )
     return html.Div(
         [
-            html.H3("Aligned model inputs"),
+            html.H3("Aligned model inputs · synthetic demo has no vendor prices"),
             html.P(
                 f"{len(rows)} shared observations from {rows[0]['start_date']} to "
                 f"{rows[-1]['end_date']}. Hover to inspect the exact model value, unit and "
@@ -905,6 +998,30 @@ def combined_correlation_matrix(presentation):
     matrix = [[1.0, *stock]]
     matrix.extend([[stock[index], *row] for index, row in enumerate(factors)])
     return labels, matrix
+
+
+def stock_factor_correlation_chart(presentation):
+    rows = presentation["relationships"]
+    values = [row["pearson"] for row in rows]
+    figure = go.Figure(
+        go.Bar(
+            x=values,
+            y=[row["label"] for row in rows],
+            orientation="h",
+            marker_color=[
+                "#116653" if value is not None and value >= 0 else "#9a5c48" for value in values
+            ],
+            hovertemplate="%{y}<br>Pearson correlation: %{x:.3f}<extra></extra>",
+        )
+    )
+    finish_figure(
+        figure,
+        "Stock correlation with each factor · before orthogonalization",
+        yaxis_title=None,
+    )
+    figure.update_layout(hovermode="closest")
+    figure.update_xaxes(range=[-1, 1], title="Pearson correlation")
+    return figure
 
 
 def collinearity_recommendations(presentation, *, correlation_limit=0.8, vif_limit=10.0):
@@ -1094,7 +1211,8 @@ def render_result(report, source):
     details = [
         html.H2("Single-stock factor view"),
         html.P(
-            f"{p['frequency']} · {p['study_currency']} · {p['sample_count']} aligned observations · "
+            f"{p['frequency']} · {p['study_currency']} · "
+            f"{p['sample_count']} aligned observations · "
             f"{p['return_mode'].replace('_', ' ')}"
         ),
     ]
@@ -1135,19 +1253,37 @@ def render_result(report, source):
             html.Div(
                 [
                     html.Div(
-                        [html.Span("Explained variation"), html.Strong(f"{p['adjusted_r_squared']:.1%}"), html.Small("Adjusted R²")],
+                        [
+                            html.Span("Explained variation"),
+                            html.Strong(f"{p['adjusted_r_squared']:.1%}"),
+                            html.Small("Adjusted R²"),
+                        ],
                         className="metric-card",
                     ),
                     html.Div(
-                        [html.Span("Strongest exposure"), html.Strong(dominant["label"]), html.Small(f"Standardized beta {_number(dominant['standardized_effect'])}")],
+                        [
+                            html.Span("Strongest exposure"),
+                            html.Strong(dominant["label"]),
+                            html.Small(
+                                f"Standardized beta {_number(dominant['standardized_effect'])}"
+                            ),
+                        ],
                         className="metric-card",
                     ),
                     html.Div(
-                        [html.Span("Joint model"), html.Strong(model_signal), html.Small(f"p = {_p_value(model_p)}")],
+                        [
+                            html.Span("Joint model"),
+                            html.Strong(model_signal),
+                            html.Small(f"p = {_p_value(model_p)}"),
+                        ],
                         className="metric-card",
                     ),
                     html.Div(
-                        [html.Span("Review flags"), html.Strong(str(review_count)), html.Small("Open diagnostics below")],
+                        [
+                            html.Span("Review flags"),
+                            html.Strong(str(review_count)),
+                            html.Small("Open diagnostics below"),
+                        ],
                         className="metric-card",
                     ),
                 ],
@@ -1184,6 +1320,17 @@ def render_result(report, source):
             graph(chart),
         ]
     )
+    details.extend(
+        [
+            html.H3("How does the stock move with each factor?"),
+            html.P(
+                "Original Pearson correlations of aligned returns or changes, before "
+                "orthogonalization. The complete factor-to-factor matrix remains under "
+                "Technical diagnostics."
+            ),
+            graph(stock_factor_correlation_chart(p)),
+        ]
+    )
     if p.get("rolling"):
         rolling = go.Figure()
         by_date = {v["end_date"]: v for v in p["rolling"]}
@@ -1214,9 +1361,7 @@ def render_result(report, source):
             "correlation, regression assumptions, alternative models and attribution details."
         ),
         html.H3("Review flags"),
-        html.Ul(
-            [html.Li(WARNINGS.get(w, w.replace("_", " "))) for w in p["diagnostics"]]
-        )
+        html.Ul([html.Li(WARNINGS.get(w, w.replace("_", " "))) for w in p["diagnostics"]])
         if p["diagnostics"]
         else html.P("No automated diagnostic warning was raised."),
     ]
@@ -1248,7 +1393,9 @@ def render_result(report, source):
                         c["label"],
                         f"{c['estimate']:.5f}",
                         _number(c["standardized_effect"]),
-                        "Withheld: irregular dates" if c["lower_95"] is None else f"[{c['lower_95']:.5f}, {c['upper_95']:.5f}]",
+                        "Withheld: irregular dates"
+                        if c["lower_95"] is None
+                        else f"[{c['lower_95']:.5f}, {c['upper_95']:.5f}]",
                         c["unit"],
                     ]
                     for c in coefficients
@@ -1268,9 +1415,24 @@ def render_result(report, source):
                     ["Test", "Statistic", "p-value", "Lag"],
                     [
                         ["Durbin–Watson", _number(diagnostic["durbin_watson"]), "—", 1],
-                        ["Ljung–Box", _number(diagnostic["ljung_box_statistic"]), _p_value(diagnostic["ljung_box_p_value"]), diagnostic["lag"]],
-                        ["Jarque–Bera", _number(diagnostic["jarque_bera_statistic"]), _p_value(diagnostic["jarque_bera_p_value"]), "—"],
-                        ["ARCH LM", _number(diagnostic["arch_lm_statistic"]), _p_value(diagnostic["arch_lm_p_value"]), diagnostic["lag"]],
+                        [
+                            "Ljung–Box",
+                            _number(diagnostic["ljung_box_statistic"]),
+                            _p_value(diagnostic["ljung_box_p_value"]),
+                            diagnostic["lag"],
+                        ],
+                        [
+                            "Jarque–Bera",
+                            _number(diagnostic["jarque_bera_statistic"]),
+                            _p_value(diagnostic["jarque_bera_p_value"]),
+                            "—",
+                        ],
+                        [
+                            "ARCH LM",
+                            _number(diagnostic["arch_lm_statistic"]),
+                            _p_value(diagnostic["arch_lm_p_value"]),
+                            diagnostic["lag"],
+                        ],
                     ],
                 ),
             ]
@@ -1431,7 +1593,12 @@ def render_result(report, source):
                                 [
                                     html.Label(f"{coefficient['label']} · {coefficient['unit']}"),
                                     dcc.Input(
-                                        id={"type": "factor-scenario-move", "term": coefficient["term"], "label": coefficient["label"], "beta": coefficient["beta"]},
+                                        id={
+                                            "type": "factor-scenario-move",
+                                            "term": coefficient["term"],
+                                            "label": coefficient["label"],
+                                            "beta": coefficient["beta"],
+                                        },
                                         type="number",
                                         value=0,
                                         step="any",
@@ -1618,9 +1785,7 @@ def single_stock_workspace():
                         ),
                     ),
                     html.Div(
-                        help_text(
-                            "Hover for the selected factor-pack definitions and sources."
-                        ),
+                        help_text("Hover for the selected factor-pack definitions and sources."),
                         id="pack-summary",
                         className="help-slot",
                     ),
@@ -1629,7 +1794,8 @@ def single_stock_workspace():
                         dcc.Dropdown(searchable=False, id="selected", multi=True),
                     ),
                     help_text(
-                        "Combine Fama–French and Bloomberg packs in one study. French models use USD "
+                        "Combine Fama–French and Bloomberg packs in one study. French models use "
+                        "USD "
                         "stock excess returns; price-change factors retain their declared units. "
                         "Select or remove individual factors "
                         "before running. Duplicate factor IDs across packs are rejected. Disabled "
@@ -1831,10 +1997,11 @@ def single_stock_workspace():
         [
             html.Details(
                 [
-                    html.Summary("Data inspector · query and verify aligned inputs"),
+                    html.Summary("Data inspector · local price levels"),
                     html.P(
-                        "Load this only when you want to inspect the current settings. It performs "
-                        "a fresh provider query and keeps normalized values in memory only."
+                        "Load daily local price levels for the selected stock and benchmarks. "
+                        "Hover to inspect values; use matching adjustment settings in Bloomberg. "
+                        "Prices stay in memory only."
                     ),
                     html.Button(
                         "Load current data",
@@ -1843,6 +2010,25 @@ def single_stock_workspace():
                         className="secondary",
                     ),
                     dcc.Loading(html.Div(id="preview-output"), type="circle"),
+                    html.Details(
+                        [
+                            html.Summary("Model inputs and alignment"),
+                            html.P(
+                                "Load the exact normalized observations used by the model, "
+                                "including FX conversion, factor transforms and alignment losses."
+                            ),
+                            html.Button(
+                                "Load aligned model inputs",
+                                id="load-model-preview",
+                                n_clicks=0,
+                                className="secondary",
+                            ),
+                            dcc.Loading(
+                                html.Div(id="model-preview-output"),
+                                type="circle",
+                            ),
+                        ]
+                    ),
                 ],
                 className="data-inspector",
             ),
@@ -2271,9 +2457,7 @@ def describe_pack(presets):
             )
             items.extend(
                 f"{factor.label}: {factor.transform} of "
-                + " + ".join(
-                    f"{weight:g} × {key}" for key, weight in factor.legs.items()
-                )
+                + " + ".join(f"{weight:g} × {key}" for key, weight in factor.legs.items())
                 + "."
                 for factor in pack.level_factors
             )
@@ -2361,6 +2545,32 @@ def update_preview(_clicks, source, *controls):
         return html.P(
             f"Data preview failed · Code: {type(error).__name__} · Reference: {reference}. "
             "Check Bloomberg connectivity, entitlements and mappings. Raw payloads are not logged."
+        )
+
+
+@app.callback(
+    Output("model-preview-output", "children"),
+    Input("load-model-preview", "n_clicks"),
+    State("source", "value"),
+    *[State(k, "value") for k in CONTROL_IDS],
+    prevent_initial_call=True,
+    running=[(Output("load-model-preview", "disabled"), True, False)],
+)
+def update_model_preview(_clicks, source, *controls):
+    try:
+        return render_preview(run_model_preview(source, *controls))
+    except (ValueError, ValidationError):
+        return html.P("Invalid settings. Resolve factor-pack, date or model-input errors first.")
+    except Exception as error:
+        reference = uuid.uuid4().hex
+        logging.getLogger(__name__).error(
+            "factor model preview stage=execution code=%s reference=%s",
+            type(error).__name__,
+            reference,
+        )
+        return html.P(
+            f"Model-input audit failed · Code: {type(error).__name__} · "
+            f"Reference: {reference}. Check provider coverage and alignment settings."
         )
 
 
